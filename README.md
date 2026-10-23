@@ -11,10 +11,11 @@ SWID (Silicon & System Hardware Identity) is a small C11 library for reading doc
 ## Target verification
 
 - ESP32-S3: ESP-IDF 5.5.1 RAM Probe build verified and physically RAM-loaded on two devices. Both completed 50-sample captures and 20 software-reset/reload checks; the size-optimized image also completed 50-sample captures on both.
-- ESP32-C3, ESP32, ESP32-S2, ESP32-C2, ESP32-C5, ESP32-C6, ESP32-C61, ESP32-H2, ESP32-H21, ESP32-H4, and ESP32-P4: RAM Probe builds verified with ESP-IDF 5.5.1. Physical RAM loading has not been verified for these targets in this checkout.
+- ESP32-C3: ESP-IDF 5.5.1 RAM Probe build and physical ROM RAM-load verified on MAC `34:B7:DA:F8:78:70` (rev 0.4, 4 MiB XMC flash). The three v2 fingerprints matched host/C canonical TLV and SHA-256; 1,000 repeated measurements across 20 software resets were stable. Full-flash read-only SHA-256 matched before and after. The original application's boot marker was not independently observable, so application recovery is unverified.
+- ESP32, ESP32-S2, ESP32-C2, ESP32-C5, ESP32-C6, ESP32-C61, ESP32-H2, ESP32-H21, ESP32-H4, and ESP32-P4: RAM Probe builds verified with ESP-IDF 5.5.1. Physical RAM loading has not been verified for these targets in this checkout.
 - SoC capability fields absent from an ESP-IDF target's headers are reported as unknown where detected; build support does not imply physical validation.
 
-On the two tested ESP32-S3 devices, read-only full-flash SHA-256 matched before and after RAM Probe, and each original application's observable boot markers returned after reset. This evidence applies only to those two device/application combinations; it is not a guarantee for other hardware or security configurations. Other targets' flash integrity and application recovery are unverified.
+On the two tested ESP32-S3 devices, read-only full-flash SHA-256 matched before and after RAM Probe, and each original application's observable boot markers returned after reset. C3 flash integrity also matched before and after, but its original application recovery was not independently verified. This evidence is limited to the tested device/application combinations and does not guarantee behavior on other hardware or security configurations. Other targets' flash integrity and application recovery are unverified.
 
 ## Build and test
 
@@ -52,7 +53,7 @@ python host/swid_nonflash.py --mac 3C:0F:02:D9:76:F0 --mode auto
 
 `auto` reads ROM/eFuse data and uses RAM Probe for targets with a declared build-verified adapter. `rom-only` and `ram-only` select those paths explicitly. No mode writes flash. `flash` reads the pre-existing FP1 application as an optional reference; it is not a flash-writing mode. Full flash SHA-256 comparison is separately opt-in with `--verify-flash` and may take several minutes.
 
-RAM Probe builds default to size optimization and a 4096-byte main task stack. The optimized S3 image was 173920 bytes versus 190960 bytes with the earlier debug configuration; both physical devices retained identical fingerprint values and had 2340 free stack words at the measured high-water mark.
+RAM Probe builds default to size optimization with a 12,288-byte main task stack, required for nested fingerprint serialization/hash frames on ESP32-C3. The optimized C3 image was 143,200 bytes. The optimized S3 image was 173920 bytes versus 190960 bytes with the earlier debug configuration; both physical devices retained identical fingerprint values and had 2340 free stack words at the measured high-water mark.
 
 `swid_serialize_fingerprint_input()` encodes the stable fingerprint schema v2. `swid_serialize_manifest()` encodes the complete manifest using its separate schema v1; the two byte streams serve different purposes.
 

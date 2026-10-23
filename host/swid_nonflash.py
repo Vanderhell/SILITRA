@@ -310,7 +310,10 @@ def build_ram_probe(target: str, repeat_count: int = 50,
     # Keep probe builds separate from legacy experiment caches whose CMake
     # source path points at the pre-consolidation experiments/ tree.
     build_name = target.removeprefix("esp32") or "classic"
-    build = ROOT / "build_probe" / "ram" / (build_name if profile == "default" else f"{build_name}-{profile}")
+    # Give stack-policy changes a fresh sdkconfig cache. IDF keeps values in
+    # sdkconfig.nonflash across reconfigure, so editing sdkconfig.defaults alone
+    # would otherwise leave an older, undersized main-task stack in place.
+    build = ROOT / "build_probe" / "ram" / (build_name if profile == "default" else f"{build_name}-{profile}-stack12k")
     sdkconfig = build / "sdkconfig.nonflash"
     env = dict(os.environ)
     env.update({"IDF_PATH": str(idf), "IDF_TOOLS_PATH": str(tools),
