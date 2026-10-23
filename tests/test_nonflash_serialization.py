@@ -120,7 +120,7 @@ class NonFlashSerializationTests(unittest.TestCase):
             artifact = {"image": image, "image_bytes": image.stat().st_size,
                         "sdkconfig_ram": True, "sdkconfig": pathlib.Path(temp) / "sdkconfig"}
             capture = {"records": [{"type": "swid_ram_probe", "free_internal_heap": 1000,
-                                    "stack_high_water_words": 300}],
+                                    "stack_high_water_bytes": 300}],
                        "load_seconds": 0.1, "capture_seconds": 0.2,
                        "software_reset_requested": True}
             with mock.patch("host.swid_nonflash.OUT", pathlib.Path(temp)), \

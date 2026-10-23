@@ -288,8 +288,8 @@ def build_ram_probe(target: str, repeat_count: int = 50,
         raise RuntimeError(f"RAM probe has no declared ESP-IDF target adapter: {target}")
     if not 1 <= repeat_count <= 100:
         raise ValueError("RAM probe repeat_count must be in 1..100")
-    if profile not in {"default", "size"}:
-        raise ValueError("RAM probe profile must be default or size")
+    if profile not in {"default", "size", "profile"}:
+        raise ValueError("RAM probe profile must be default, size, or profile")
     idf = pathlib.Path(os.environ.get("SWID_IDF_PATH", os.environ.get("IDF_PATH", r"C:\esp\v5.5.1\esp-idf")))
     tools = pathlib.Path(os.environ.get("IDF_TOOLS_PATH", r"C:\Espressif\tools"))
     if not (idf / "tools" / "cmake" / "project.cmake").is_file():
@@ -310,10 +310,11 @@ def build_ram_probe(target: str, repeat_count: int = 50,
     # Keep probe builds separate from legacy experiment caches whose CMake
     # source path points at the pre-consolidation experiments/ tree.
     build_name = target.removeprefix("esp32") or "classic"
-    # Give stack-policy changes a fresh sdkconfig cache. IDF keeps values in
-    # sdkconfig.nonflash across reconfigure, so editing sdkconfig.defaults alone
-    # would otherwise leave an older, undersized main-task stack in place.
-    build = ROOT / "build_probe" / "ram" / (build_name if profile == "default" else f"{build_name}-{profile}-stack12k")
+    # A changed probe stack policy needs a fresh sdkconfig cache. IDF keeps
+    # sdkconfig.nonflash across reconfigure, so separate this optimized profile
+    # from prior builds that cached the larger 12 KiB stack.
+    build_suffix = f"{build_name}-fpbuf640"
+    build = ROOT / "build_probe" / "ram" / (build_suffix if profile == "default" else f"{build_suffix}-{profile}")
     sdkconfig = build / "sdkconfig.nonflash"
     env = dict(os.environ)
     env.update({"IDF_PATH": str(idf), "IDF_TOOLS_PATH": str(tools),
@@ -341,14 +342,14 @@ def build_ram_probe(target: str, repeat_count: int = 50,
     env["PATH"] = str(python.parent) + ";" + str(bin_dir) + ";" + env.get("PATH", "")
     probe_project = ROOT / "probes" / "ram"
     defaults = str(probe_project / "sdkconfig.defaults")
-    if profile == "size":
+    if profile in {"size", "profile"}:
         defaults += ";" + str(probe_project / "sdkconfig.defaults.size")
     if target == "esp32s3":
         defaults += ";" + str(probe_project / "sdkconfig.defaults.esp32s3")
     args = [str(cmake), "-G", "Ninja", "-S", str(probe_project), "-B", str(build),
             f"-DIDF_TARGET={target}", f"-DSDKCONFIG={sdkconfig}",
             f"-DSDKCONFIG_DEFAULTS={defaults}",
-              f"-DCMAKE_C_FLAGS=-DSWID_RAM_PROBE_REPEAT_COUNT={repeat_count} -DSWID_RAM_PROBE_RESTART_AFTER_CAPTURE={1 if restart_after_capture else 0}",
+              f"-DCMAKE_C_FLAGS=-DSWID_RAM_PROBE_REPEAT_COUNT={repeat_count} -DSWID_RAM_PROBE_RESTART_AFTER_CAPTURE={1 if restart_after_capture else 0} -DSWID_RAM_PROBE_PROFILE_TIMINGS={1 if profile == 'profile' else 0}{' -fstack-usage' if profile == 'profile' else ''}",
               f"-DPYTHON={python}"]
     if target in riscv_arch:
         toolchain_file = idf / "tools" / "cmake" / f"toolchain-{target}.cmake"
@@ -747,7 +748,11 @@ def run_ram_campaign(port: str, expected_mac: str | None,
                       "scheme_v2_match": all(v["tlv_matches_device"] and v["sha256_matches_device"] for v in validated["fingerprints"].values()),
                       "ram_image_bytes": artifact["image_bytes"],
                       "free_internal_heap_bytes": next(x["free_internal_heap"] for x in capture["records"] if x.get("type") == "swid_ram_probe"),
-                      "stack_high_water_words": next(x["stack_high_water_words"] for x in capture["records"] if x.get("type") == "swid_ram_probe"),
+                      "stack_high_water_bytes": next((x["stack_high_water_bytes"] for x in capture["records"] if x.get("type") == "resource_summary"),
+                          next(x["stack_high_water_bytes"] for x in capture["records"] if x.get("type") == "swid_ram_probe")),
+                      "configured_main_stack_bytes": next((x["configured_main_stack_bytes"] for x in capture["records"] if x.get("type") == "resource_summary"), None),
+                      "free_internal_heap_bytes": next((x["free_internal_heap_bytes"] for x in capture["records"] if x.get("type") == "resource_summary"),
+                          next(x["free_internal_heap"] for x in capture["records"] if x.get("type") == "swid_ram_probe")),
                       "load_seconds": capture["load_seconds"], "capture_seconds": capture["capture_seconds"],
                       "safety_assumptions": ["esptool ROM loader; no-stub RAM transfer", "probe uses RAM and read-only identity APIs", "PSRAM interface initialized with memory test disabled", "no flash/eFuse/OTP/NVS writes"],
                       "flash_unchanged": result["flash_unchanged"], "testing": "PHYSICAL_RAM_ONLY"},

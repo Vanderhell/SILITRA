@@ -181,7 +181,9 @@ swid_err_t swid_serialize_fingerprint_input(const swid_manifest_t *manifest, swi
 }
 
 swid_err_t swid_get_fingerprint(swid_fingerprint_kind_t kind, uint8_t out[32]) {
-    uint8_t canonical[4096]; size_t written = 0; if (!out) return SWID_ERR_ARG; if (!g_initialized) return SWID_ERR_NOT_INITIALIZED;
+    /* The fixed v2 schema has a compile-time upper bound; keep transient
+     * serialization bounded and small enough for embedded task stacks. */
+    uint8_t canonical[SWID_FINGERPRINT_INPUT_MAX_BYTES]; size_t written = 0; if (!out) return SWID_ERR_ARG; if (!g_initialized) return SWID_ERR_NOT_INITIALIZED;
     if (kind < SWID_FP_SILICON || kind > SWID_FP_PROFILE) return SWID_ERR_ARG;
     swid_err_t err = serialize_kind(&g_manifest, kind, canonical, sizeof(canonical), &written); if (err != SWID_OK) return err;
     return swid_port_hash256(canonical, written, out);

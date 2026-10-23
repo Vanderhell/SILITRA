@@ -1,4 +1,5 @@
 #include "swid.h"
+#include "../../../ports/swid_port.h"
 
 #include "esp_chip_info.h"
 #include "esp_system.h"
@@ -17,11 +18,69 @@
 #ifndef SWID_RAM_PROBE_RESTART_AFTER_CAPTURE
 #define SWID_RAM_PROBE_RESTART_AFTER_CAPTURE 0
 #endif
+#ifndef SWID_RAM_PROBE_PROFILE_TIMINGS
+#define SWID_RAM_PROBE_PROFILE_TIMINGS 0
+#endif
 
 static swid_manifest_t manifest;
-static uint8_t canonical[1024];
+static uint8_t canonical[SWID_FINGERPRINT_INPUT_MAX_BYTES];
 static uint8_t digest[32];
-static char hex[2049];
+static char hex[SWID_FINGERPRINT_INPUT_MAX_BYTES * 2u + 1u];
+#if SWID_RAM_PROBE_PROFILE_TIMINGS
+static uint8_t manifest_tlv[1024];
+static size_t canonical_len;
+static size_t manifest_tlv_len;
+static swid_fingerprint_kind_t benchmark_kind;
+
+enum { BENCH_INIT, BENCH_GET_MANIFEST, BENCH_MANIFEST_TLV, BENCH_FP_TLV, BENCH_SHA256, BENCH_FINGERPRINT };
+
+static swid_err_t run_bench_operation(unsigned operation) {
+    switch (operation) {
+    case BENCH_INIT: return swid_init();
+    case BENCH_GET_MANIFEST: return swid_get_manifest(&manifest);
+    case BENCH_MANIFEST_TLV: return swid_serialize_manifest(&manifest, manifest_tlv, sizeof(manifest_tlv), &manifest_tlv_len);
+    case BENCH_FP_TLV: return swid_serialize_fingerprint_input(&manifest, benchmark_kind, canonical, sizeof(canonical), &canonical_len);
+    case BENCH_SHA256: return swid_port_hash256(canonical, canonical_len, digest);
+    case BENCH_FINGERPRINT: return swid_get_fingerprint(benchmark_kind, digest);
+    default: return SWID_ERR_ARG;
+    }
+}
+
+static void emit_timing(unsigned operation, const char *name, unsigned samples) {
+    uint32_t values[16];
+    if (samples > sizeof(values) / sizeof(values[0])) samples = sizeof(values) / sizeof(values[0]);
+    for (unsigned i = 0; i < samples; ++i) {
+        const int64_t start = esp_timer_get_time();
+        const swid_err_t result = run_bench_operation(operation);
+        const int64_t elapsed = esp_timer_get_time() - start;
+        if (result != SWID_OK || elapsed < 0 || elapsed > UINT32_MAX) {
+            printf("{\"type\":\"timing_error\",\"operation\":\"%s\",\"code\":%d}\n", name, (int)result);
+            return;
+        }
+        values[i] = (uint32_t)elapsed;
+    }
+    for (unsigned i = 1; i < samples; ++i) {
+        const uint32_t value = values[i]; unsigned j = i;
+        while (j && values[j - 1] > value) { values[j] = values[j - 1]; --j; }
+        values[j] = value;
+    }
+    const uint32_t median = samples & 1u ? values[samples / 2u] : (values[samples / 2u - 1u] + values[samples / 2u]) / 2u;
+    printf("{\"type\":\"timing\",\"operation\":\"%s\",\"samples\":%u,\"min_us\":%" PRIu32 ",\"median_us\":%" PRIu32 ",\"max_us\":%" PRIu32 "}\n",
+           name, samples, values[0], median, values[samples - 1u]);
+}
+
+static void emit_timing_profile(void) {
+    emit_timing(BENCH_INIT, "swid_init", 16);
+    emit_timing(BENCH_GET_MANIFEST, "swid_get_manifest", 16);
+    emit_timing(BENCH_MANIFEST_TLV, "swid_serialize_manifest", 16);
+    for (unsigned i = 0; i < 3; ++i) {
+        benchmark_kind = (swid_fingerprint_kind_t)(i + 1u);
+        emit_timing(BENCH_FP_TLV, i == 0 ? "silicon_tlv" : i == 1 ? "assembly_tlv" : "profile_tlv", 16);
+        emit_timing(BENCH_SHA256, i == 0 ? "silicon_sha256" : i == 1 ? "assembly_sha256" : "profile_sha256", 16);
+        emit_timing(BENCH_FINGERPRINT, i == 0 ? "silicon_fingerprint" : i == 1 ? "assembly_fingerprint" : "profile_fingerprint", 16);
+    }
+}
+#endif
 
 static void to_hex(const uint8_t *in, size_t n, char *out) {
     static const char alphabet[] = "0123456789ABCDEF";
@@ -35,7 +94,7 @@ static void to_hex(const uint8_t *in, size_t n, char *out) {
 static void emit_fingerprint(swid_fingerprint_kind_t kind, const char *name) {
     size_t n = 0;
     if (swid_serialize_fingerprint_input(&manifest, kind, canonical, sizeof(canonical), &n) != SWID_OK ||
-        swid_get_fingerprint(kind, digest) != SWID_OK || n * 2 >= sizeof(hex)) {
+        swid_port_hash256(canonical, n, digest) != SWID_OK || n * 2 >= sizeof(hex)) {
         printf("{\"type\":\"error\",\"operation\":\"fingerprint\",\"kind\":\"%s\"}\n", name);
         return;
     }
@@ -106,7 +165,7 @@ void app_main(void) {
      * Without this handoff pause, the USB console can discard early output. */
     vTaskDelay(pdMS_TO_TICKS(2000));
 
-    printf("{\"type\":\"swid_ram_probe\",\"schema\":%u,\"target\":\"%s\",\"build_type\":\"RAM\",\"flash_write_attempted\":false,\"efuse_write_attempted\":false,\"init_us\":%" PRId64 ",\"free_internal_heap\":%u,\"stack_high_water_words\":%u}\n",
+    printf("{\"type\":\"swid_ram_probe\",\"schema\":%u,\"target\":\"%s\",\"build_type\":\"RAM\",\"flash_write_attempted\":false,\"efuse_write_attempted\":false,\"init_us\":%" PRId64 ",\"free_internal_heap\":%u,\"stack_high_water_bytes\":%u}\n",
            SWID_SCHEMA_VERSION, CONFIG_IDF_TARGET, initialized - begin,
            (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
            (unsigned)uxTaskGetStackHighWaterMark(NULL));
@@ -143,6 +202,13 @@ void app_main(void) {
     emit_fingerprint(SWID_FP_ASSEMBLY, "assembly");
     emit_fingerprint(SWID_FP_PROFILE, "profile");
     emit_repeat_samples();
+#if SWID_RAM_PROBE_PROFILE_TIMINGS
+    emit_timing_profile();
+#endif
+    printf("{\"type\":\"resource_summary\",\"configured_main_stack_bytes\":%u,\"stack_high_water_bytes\":%u,\"free_internal_heap_bytes\":%u}\n",
+           (unsigned)CONFIG_ESP_MAIN_TASK_STACK_SIZE,
+           (unsigned)uxTaskGetStackHighWaterMark(NULL),
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 #if SWID_RAM_PROBE_RESTART_AFTER_CAPTURE
     printf("{\"type\":\"software_reset_request\",\"method\":\"esp_restart\",\"flash_write_attempted\":false}\n");
 #endif

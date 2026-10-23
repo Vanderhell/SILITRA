@@ -93,6 +93,10 @@ typedef enum {
     SWID_PERIPH_MAX
 } swid_peripheral_type_t;
 
+/* Maximum v2 profile input: 18 header + 29 chip + 33 memory + 20 radio
+ * bytes and at most one 15-byte TLV per declared peripheral type. */
+#define SWID_FINGERPRINT_INPUT_MAX_BYTES (100u + 15u * SWID_PERIPH_MAX)
+
 typedef struct {
     swid_peripheral_type_t type;
     uint8_t supported;
