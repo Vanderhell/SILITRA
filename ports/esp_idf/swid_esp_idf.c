@@ -7,10 +7,30 @@
 #include "esp_flash.h"
 #include "esp_mac.h"
 #include "esp_psram.h"
-#if defined(CONFIG_IDF_TARGET_ESP32C3)
-#include "esp32c3/rom/sha.h"
+#if defined(CONFIG_IDF_TARGET_ESP32)
+#include "esp32/rom/sha.h"
+#elif defined(CONFIG_IDF_TARGET_ESP32S2)
+#include "esp32s2/rom/sha.h"
 #elif defined(CONFIG_IDF_TARGET_ESP32S3)
 #include "esp32s3/rom/sha.h"
+#elif defined(CONFIG_IDF_TARGET_ESP32C2)
+#include "esp32c2/rom/sha.h"
+#elif defined(CONFIG_IDF_TARGET_ESP32C3)
+#include "esp32c3/rom/sha.h"
+#elif defined(CONFIG_IDF_TARGET_ESP32C5)
+#include "esp32c5/rom/sha.h"
+#elif defined(CONFIG_IDF_TARGET_ESP32C6)
+#include "esp32c6/rom/sha.h"
+#elif defined(CONFIG_IDF_TARGET_ESP32C61)
+#include "esp32c61/rom/sha.h"
+#elif defined(CONFIG_IDF_TARGET_ESP32H2)
+#include "esp32h2/rom/sha.h"
+#elif defined(CONFIG_IDF_TARGET_ESP32H21)
+#include "esp32h21/rom/sha.h"
+#elif defined(CONFIG_IDF_TARGET_ESP32H4)
+#include "esp32h4/rom/sha.h"
+#elif defined(CONFIG_IDF_TARGET_ESP32P4)
+#include "esp32p4/rom/sha.h"
 #else
 #error "SWID ROM SHA adapter is not implemented for this ESP-IDF target"
 #endif
@@ -22,6 +42,30 @@
  * Missing count macros mean "not exposed by this IDF target", not zero silicon. */
 #ifndef SOC_DAC_SUPPORTED
 #define SOC_DAC_SUPPORTED 0
+#endif
+#ifdef SOC_ADC_SUPPORTED
+#define SWID_SOC_ADC_KNOWN 1
+#else
+#define SOC_ADC_SUPPORTED 0
+#define SWID_SOC_ADC_KNOWN 0
+#endif
+#ifdef SOC_I2S_SUPPORTED
+#define SWID_SOC_I2S_KNOWN 1
+#else
+#define SOC_I2S_SUPPORTED 0
+#define SWID_SOC_I2S_KNOWN 0
+#endif
+#ifdef SOC_GPSPI_SUPPORTED
+#define SWID_SOC_GPSPI_KNOWN 1
+#else
+#define SOC_GPSPI_SUPPORTED 0
+#define SWID_SOC_GPSPI_KNOWN 0
+#endif
+#ifdef SOC_I2C_SUPPORTED
+#define SWID_SOC_I2C_KNOWN 1
+#else
+#define SOC_I2C_SUPPORTED 0
+#define SWID_SOC_I2C_KNOWN 0
 #endif
 #ifndef SOC_DAC_CHAN_NUM
 #define SOC_DAC_CHAN_NUM 0
@@ -149,13 +193,27 @@
 #error "ESP32-S3/C3 capability adapter must not report Bluetooth Classic"
 #endif
 
-static void add_peripheral(swid_peripheral_profile_t *p, swid_peripheral_type_t type, uint8_t supported, uint8_t controllers, uint16_t channels) {
+static void add_peripheral_ex(swid_peripheral_profile_t *p, swid_peripheral_type_t type,
+                              uint8_t supported, uint8_t controllers, uint16_t channels, uint8_t known) {
     if (p->count >= SWID_MAX_PERIPHERALS) return;
     swid_peripheral_t *item = &p->items[p->count++];
     item->type = type; item->supported = supported; item->controller_count = controllers; item->channel_count = channels;
-    item->status = supported ? SWID_SUPPORTED : SWID_UNAVAILABLE;
+    item->status = !known ? SWID_UNKNOWN : (supported ? SWID_SUPPORTED : SWID_UNAVAILABLE);
     item->evidence = SWID_EVIDENCE_BUILD_CAPABILITY;
 }
+
+static void mark_peripheral_unknown(swid_peripheral_profile_t *p, swid_peripheral_type_t type) {
+    for (size_t i = 0; i < p->count; ++i) {
+        if (p->items[i].type == type) {
+            p->items[i].status = SWID_UNKNOWN;
+            p->items[i].evidence = SWID_EVIDENCE_UNKNOWN;
+            return;
+        }
+    }
+}
+
+#define add_peripheral(p, type, supported, controllers, channels) \
+    add_peripheral_ex((p), (type), (supported), (controllers), (channels), 1)
 
 #ifdef SOC_UART_NUM
 #define SWID_UART_COUNT SOC_UART_NUM
@@ -197,10 +255,10 @@ static void add_peripheral(swid_peripheral_profile_t *p, swid_peripheral_type_t 
 static void collect_peripherals(swid_peripheral_profile_t *p) {
     memset(p, 0, sizeof(*p));
     add_peripheral(p, SWID_PERIPH_UART, SOC_UART_SUPPORTED, SWID_UART_COUNT, 0);
-    add_peripheral(p, SWID_PERIPH_SPI, SOC_GPSPI_SUPPORTED, SWID_SPI_COUNT, 0);
-    add_peripheral(p, SWID_PERIPH_I2C, SOC_I2C_SUPPORTED, SWID_I2C_COUNT, 0);
-    add_peripheral(p, SWID_PERIPH_I2S, SOC_I2S_SUPPORTED, SWID_I2S_COUNT, 0);
-    add_peripheral(p, SWID_PERIPH_ADC, SOC_ADC_SUPPORTED, SWID_ADC_COUNT, SOC_ADC_MAX_CHANNEL_NUM);
+    add_peripheral_ex(p, SWID_PERIPH_SPI, SOC_GPSPI_SUPPORTED, SWID_SPI_COUNT, 0, SWID_SOC_GPSPI_KNOWN);
+    add_peripheral_ex(p, SWID_PERIPH_I2C, SOC_I2C_SUPPORTED, SWID_I2C_COUNT, 0, SWID_SOC_I2C_KNOWN);
+    add_peripheral_ex(p, SWID_PERIPH_I2S, SOC_I2S_SUPPORTED, SWID_I2S_COUNT, 0, SWID_SOC_I2S_KNOWN);
+    add_peripheral_ex(p, SWID_PERIPH_ADC, SOC_ADC_SUPPORTED, SWID_ADC_COUNT, SOC_ADC_MAX_CHANNEL_NUM, SWID_SOC_ADC_KNOWN);
     add_peripheral(p, SWID_PERIPH_DAC, SOC_DAC_SUPPORTED, SOC_DAC_CHAN_NUM, SOC_DAC_CHAN_NUM);
     add_peripheral(p, SWID_PERIPH_GPIO, 1, 1, SWID_GPIO_COUNT);
     add_peripheral(p, SWID_PERIPH_RTC_GPIO, SOC_RTCIO_PIN_COUNT > 0, 1, SOC_RTCIO_PIN_COUNT);
@@ -231,7 +289,43 @@ static void collect_peripherals(swid_peripheral_profile_t *p) {
     add_peripheral(p, SWID_PERIPH_LP_CPU, SOC_LP_CORE_SUPPORTED, 1, 0);
     add_peripheral(p, SWID_PERIPH_ULP, SOC_ULP_SUPPORTED, 1, 0);
     p->status = SWID_DETECTED; p->evidence = SWID_EVIDENCE_BUILD_CAPABILITY;
+#if defined(CONFIG_IDF_TARGET_ESP32H4)
+    /* IDF 5.5.1 explicitly leaves these H4 SOC_* entries as TODO/commented
+     * in soc_caps.h. Zero fallback values must not be interpreted as silicon absence. */
+    mark_peripheral_unknown(p, SWID_PERIPH_ADC);
+    mark_peripheral_unknown(p, SWID_PERIPH_DAC);
+    mark_peripheral_unknown(p, SWID_PERIPH_SPI);
+    mark_peripheral_unknown(p, SWID_PERIPH_I2C);
+    mark_peripheral_unknown(p, SWID_PERIPH_I2S);
+    mark_peripheral_unknown(p, SWID_PERIPH_LEDC);
+    mark_peripheral_unknown(p, SWID_PERIPH_MCPWM);
+    mark_peripheral_unknown(p, SWID_PERIPH_RMT);
+    mark_peripheral_unknown(p, SWID_PERIPH_PCNT);
+    mark_peripheral_unknown(p, SWID_PERIPH_TWAI);
+    mark_peripheral_unknown(p, SWID_PERIPH_USB_OTG);
+    mark_peripheral_unknown(p, SWID_PERIPH_USB_SERIAL_JTAG);
+    mark_peripheral_unknown(p, SWID_PERIPH_TEMPERATURE);
+    mark_peripheral_unknown(p, SWID_PERIPH_BLUETOOTH);
+    mark_peripheral_unknown(p, SWID_PERIPH_LP_CPU);
+    mark_peripheral_unknown(p, SWID_PERIPH_ULP);
+    p->status = SWID_UNKNOWN;
+#elif defined(CONFIG_IDF_TARGET_ESP32H21)
+    /* H21 IDF 5.5.1 SoC headers also leave the following entries undocumented. */
+    mark_peripheral_unknown(p, SWID_PERIPH_ADC);
+    mark_peripheral_unknown(p, SWID_PERIPH_I2S);
+    mark_peripheral_unknown(p, SWID_PERIPH_LEDC);
+    mark_peripheral_unknown(p, SWID_PERIPH_PCNT);
+    mark_peripheral_unknown(p, SWID_PERIPH_MCPWM);
+    mark_peripheral_unknown(p, SWID_PERIPH_TWAI);
+    mark_peripheral_unknown(p, SWID_PERIPH_RMT);
+    mark_peripheral_unknown(p, SWID_PERIPH_USB_SERIAL_JTAG);
+    mark_peripheral_unknown(p, SWID_PERIPH_TEMPERATURE);
+    mark_peripheral_unknown(p, SWID_PERIPH_ULP);
+    mark_peripheral_unknown(p, SWID_PERIPH_BLUETOOTH);
+    p->status = SWID_UNKNOWN;
+#endif
 }
+#undef add_peripheral
 #endif
 
 swid_err_t swid_port_collect(swid_manifest_t *out) {
@@ -262,6 +356,11 @@ swid_err_t swid_port_collect(swid_manifest_t *out) {
     if (esp_read_mac(out->radio.ap_mac, ESP_MAC_WIFI_SOFTAP) == ESP_OK) out->radio.derived_mac_count++;
     if (esp_read_mac(out->radio.bt_mac, ESP_MAC_BT) == ESP_OK) out->radio.derived_mac_count++;
     out->radio.status = SWID_DETECTED; out->radio.evidence = SWID_EVIDENCE_RUNTIME_READ;
+#if defined(CONFIG_IDF_TARGET_ESP32H4) || defined(CONFIG_IDF_TARGET_ESP32H21)
+    /* These targets have incomplete Wi-Fi/Bluetooth SoC capability declarations in IDF 5.5.1. */
+    out->radio.status = SWID_UNKNOWN;
+    out->radio.evidence = SWID_EVIDENCE_UNKNOWN;
+#endif
 #endif
 #if defined(SWID_PROFILE_FULL)
     collect_peripherals(&out->peripherals); return SWID_OK;
@@ -273,9 +372,21 @@ swid_err_t swid_port_collect(swid_manifest_t *out) {
 
 swid_err_t swid_port_hash256(const uint8_t *data, size_t len, uint8_t out[32]) {
     if (!data || !out) return SWID_ERR_ARG;
+#if defined(CONFIG_IDF_TARGET_ESP32)
+    if (len > (SIZE_MAX / 8u)) return SWID_ERR_ARG;
+    SHA_CTX ctx;
+    ets_sha_enable();
+    ets_sha_init(&ctx);
+    ets_sha_update(&ctx, SHA2_256, data, len * 8u);
+    ets_sha_finish(&ctx, SHA2_256, out);
+    ets_sha_disable();
+    return SWID_OK;
+#else
+    if (len > UINT32_MAX) return SWID_ERR_ARG;
     SHA_CTX ctx;
     ets_sha_enable();
     if (ets_sha_init(&ctx, SHA2_256) != 0) { ets_sha_disable(); return SWID_ERR_HASH; }
     ets_sha_update(&ctx, data, (uint32_t)len, false);
     return ets_sha_finish(&ctx, out) == 0 ? (ets_sha_disable(), SWID_OK) : (ets_sha_disable(), SWID_ERR_HASH);
+#endif
 }
