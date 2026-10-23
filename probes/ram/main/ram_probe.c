@@ -1,0 +1,156 @@
+#include "swid.h"
+
+#include "esp_chip_info.h"
+#include "esp_system.h"
+#include "esp_timer.h"
+#include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#include <inttypes.h>
+#include <stdio.h>
+#include <string.h>
+
+#ifndef SWID_RAM_PROBE_REPEAT_COUNT
+#define SWID_RAM_PROBE_REPEAT_COUNT 50
+#endif
+#ifndef SWID_RAM_PROBE_RESTART_AFTER_CAPTURE
+#define SWID_RAM_PROBE_RESTART_AFTER_CAPTURE 0
+#endif
+
+static swid_manifest_t manifest;
+static uint8_t canonical[1024];
+static uint8_t digest[32];
+static char hex[2049];
+
+static void to_hex(const uint8_t *in, size_t n, char *out) {
+    static const char alphabet[] = "0123456789ABCDEF";
+    for (size_t i = 0; i < n; ++i) {
+        out[i * 2] = alphabet[in[i] >> 4];
+        out[i * 2 + 1] = alphabet[in[i] & 0x0f];
+    }
+    out[n * 2] = '\0';
+}
+
+static void emit_fingerprint(swid_fingerprint_kind_t kind, const char *name) {
+    size_t n = 0;
+    if (swid_serialize_fingerprint_input(&manifest, kind, canonical, sizeof(canonical), &n) != SWID_OK ||
+        swid_get_fingerprint(kind, digest) != SWID_OK || n * 2 >= sizeof(hex)) {
+        printf("{\"type\":\"error\",\"operation\":\"fingerprint\",\"kind\":\"%s\"}\n", name);
+        return;
+    }
+    to_hex(canonical, n, hex);
+    char digest_hex[65];
+    to_hex(digest, sizeof(digest), digest_hex);
+    printf("{\"type\":\"fingerprint\",\"schema\":%u,\"kind\":\"%s\",\"tlv_hex\":\"%s\",\"sha256\":\"%s\"}\n",
+           SWID_SCHEMA_VERSION, name, hex, digest_hex);
+}
+
+static void emit_repeat_samples(void) {
+    uint8_t baseline[3][32], current[3][32], last[3][32];
+    const swid_fingerprint_kind_t kinds[] = {SWID_FP_SILICON, SWID_FP_ASSEMBLY, SWID_FP_PROFILE};
+    uint32_t mismatches[3] = {0, 0, 0};
+    uint64_t elapsed_total = 0;
+    uint32_t elapsed_min = UINT32_MAX, elapsed_max = 0;
+    char first_hex[3][65], last_hex[3][65];
+    for (unsigned kind = 0; kind < 3; ++kind) {
+        if (swid_get_fingerprint(kinds[kind], baseline[kind]) != SWID_OK) {
+            printf("{\"type\":\"repeat_error\",\"index\":0,\"code\":-1}\n");
+            fflush(stdout);
+            return;
+        }
+        memcpy(last[kind], baseline[kind], sizeof(last[kind]));
+        to_hex(baseline[kind], sizeof(baseline[kind]), first_hex[kind]);
+    }
+    for (unsigned index = 0; index < SWID_RAM_PROBE_REPEAT_COUNT; ++index) {
+        const int64_t started = esp_timer_get_time();
+        swid_err_t err = swid_init();
+        if (err == SWID_OK) err = swid_get_manifest(&manifest);
+        for (unsigned kind = 0; err == SWID_OK && kind < 3; ++kind)
+            err = swid_get_fingerprint(kinds[kind], current[kind]);
+        if (err != SWID_OK) {
+            printf("{\"type\":\"repeat_error\",\"index\":%u,\"code\":%d}\n", index, (int)err);
+            fflush(stdout);
+            return;
+        }
+        for (unsigned kind = 0; kind < 3; ++kind) {
+            if (memcmp(current[kind], baseline[kind], sizeof(current[kind])) != 0) ++mismatches[kind];
+            memcpy(last[kind], current[kind], sizeof(last[kind]));
+        }
+        const uint32_t elapsed = (uint32_t)(esp_timer_get_time() - started);
+        elapsed_total += elapsed;
+        if (elapsed < elapsed_min) elapsed_min = elapsed;
+        if (elapsed > elapsed_max) elapsed_max = elapsed;
+    }
+    for (unsigned kind = 0; kind < 3; ++kind) to_hex(last[kind], sizeof(last[kind]), last_hex[kind]);
+    printf("{\"type\":\"repeat_summary\",\"count\":%u,\"silicon_mismatches\":%" PRIu32
+           ",\"assembly_mismatches\":%" PRIu32 ",\"profile_mismatches\":%" PRIu32
+           ",\"first_silicon\":\"%s\",\"last_silicon\":\"%s\",\"first_assembly\":\"%s\",\"last_assembly\":\"%s\",\"first_profile\":\"%s\",\"last_profile\":\"%s\",\"collection_min_us\":%" PRIu32
+           ",\"collection_max_us\":%" PRIu32 ",\"collection_total_us\":%" PRIu64 "}\n",
+           (unsigned)SWID_RAM_PROBE_REPEAT_COUNT, mismatches[0], mismatches[1], mismatches[2],
+           first_hex[0], last_hex[0], first_hex[1], last_hex[1], first_hex[2], last_hex[2],
+           elapsed_min, elapsed_max, elapsed_total);
+    fflush(stdout);
+}
+
+void app_main(void) {
+    const int64_t begin = esp_timer_get_time();
+    const swid_err_t init = swid_init();
+    const int64_t initialized = esp_timer_get_time();
+    if (init != SWID_OK || swid_get_manifest(&manifest) != SWID_OK) {
+        printf("{\"type\":\"error\",\"operation\":\"swid_init\",\"code\":%d}\n", (int)init);
+        for (;;) vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+    /* Give the host time to re-open USB Serial/JTAG after esptool releases it.
+     * Without this handoff pause, the USB console can discard early output. */
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
+    printf("{\"type\":\"swid_ram_probe\",\"schema\":%u,\"target\":\"%s\",\"build_type\":\"RAM\",\"flash_write_attempted\":false,\"efuse_write_attempted\":false,\"init_us\":%" PRId64 ",\"free_internal_heap\":%u,\"stack_high_water_words\":%u}\n",
+           SWID_SCHEMA_VERSION, CONFIG_IDF_TARGET, initialized - begin,
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+           (unsigned)uxTaskGetStackHighWaterMark(NULL));
+    printf("{\"type\":\"chip\",\"family\":%u,\"model\":%u,\"revision\":%u,\"cores\":%u,\"package\":%u,\"features\":%" PRIu32 ",\"status\":%u,\"evidence\":%u}\n",
+           manifest.chip.family, manifest.chip.model, manifest.chip.revision, manifest.chip.cores,
+           manifest.chip.package, manifest.chip.features, manifest.chip.status, manifest.chip.evidence);
+
+    printf("{\"type\":\"identity\",\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\",\"mac_valid\":%u,\"optional_uid\":\"",
+           manifest.identity.base_mac[0], manifest.identity.base_mac[1], manifest.identity.base_mac[2],
+           manifest.identity.base_mac[3], manifest.identity.base_mac[4], manifest.identity.base_mac[5],
+           manifest.identity.base_mac_valid);
+    for (size_t i = 0; i < sizeof(manifest.identity.optional_uid); ++i) printf("%02X", manifest.identity.optional_uid[i]);
+    printf("\",\"optional_uid_bits\":%u,\"optional_uid_valid\":%u}\n",
+           manifest.identity.optional_uid_bits, manifest.identity.optional_uid_valid);
+
+    printf("{\"type\":\"memory\",\"jedec\":%" PRIu32 ",\"flash_capacity\":%" PRIu32 ",\"flash_uid\":\"%016" PRIX64 "\",\"flash_uid_valid\":%u,\"psram_capacity\":%" PRIu32 ",\"psram_present\":%u,\"psram_interface\":%u,\"psram_location\":%u}\n",
+           manifest.memory.flash_jedec_id, manifest.memory.flash_capacity_bytes, manifest.memory.flash_unique_id,
+           manifest.memory.flash_unique_id_valid, manifest.memory.psram_capacity_bytes, manifest.memory.psram_present,
+           manifest.memory.psram_interface, manifest.memory.psram_location);
+    printf("{\"type\":\"radio\",\"wifi\":%u,\"wifi_generation\":%u,\"bluetooth\":%u,\"ble\":%u,\"bt_classic\":%u,\"sta_mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\",\"ap_mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\",\"bt_mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\",\"derived_mac_count\":%u}\n",
+           manifest.radio.wifi_supported, manifest.radio.wifi_generation, manifest.radio.bluetooth_supported,
+           manifest.radio.ble_supported, manifest.radio.bt_classic_supported,
+           manifest.radio.sta_mac[0],manifest.radio.sta_mac[1],manifest.radio.sta_mac[2],manifest.radio.sta_mac[3],manifest.radio.sta_mac[4],manifest.radio.sta_mac[5],
+           manifest.radio.ap_mac[0],manifest.radio.ap_mac[1],manifest.radio.ap_mac[2],manifest.radio.ap_mac[3],manifest.radio.ap_mac[4],manifest.radio.ap_mac[5],
+           manifest.radio.bt_mac[0],manifest.radio.bt_mac[1],manifest.radio.bt_mac[2],manifest.radio.bt_mac[3],manifest.radio.bt_mac[4],manifest.radio.bt_mac[5],
+           manifest.radio.derived_mac_count);
+    printf("{\"type\":\"peripheral_count\",\"count\":%u}\n", (unsigned)manifest.peripherals.count);
+    for (size_t i = 0; i < manifest.peripherals.count; ++i) {
+        const swid_peripheral_t *p = &manifest.peripherals.items[i];
+        printf("{\"type\":\"peripheral\",\"peripheral_type\":%u,\"supported\":%u,\"controllers\":%u,\"channels\":%u,\"feature_flags\":%" PRIu32 ",\"status\":%u,\"evidence\":%u}\n",
+               p->type, p->supported, p->controller_count, p->channel_count, p->feature_flags, p->status, p->evidence);
+    }
+    emit_fingerprint(SWID_FP_SILICON, "silicon");
+    emit_fingerprint(SWID_FP_ASSEMBLY, "assembly");
+    emit_fingerprint(SWID_FP_PROFILE, "profile");
+    emit_repeat_samples();
+#if SWID_RAM_PROBE_RESTART_AFTER_CAPTURE
+    printf("{\"type\":\"software_reset_request\",\"method\":\"esp_restart\",\"flash_write_attempted\":false}\n");
+#endif
+    printf("{\"type\":\"complete\",\"flash_write_attempted\":false,\"efuse_write_attempted\":false}\n");
+    fflush(stdout);
+#if SWID_RAM_PROBE_RESTART_AFTER_CAPTURE
+    vTaskDelay(pdMS_TO_TICKS(250));
+    esp_restart();
+#endif
+    for (;;) vTaskDelay(pdMS_TO_TICKS(1000));
+}
