@@ -10,7 +10,7 @@ SWID (Silicon & System Hardware Identity) is a small C11 library for reading doc
 
 ## Target verification
 
-- ESP32-S3: ESP-IDF 5.5.1 RAM Probe build verified and physically RAM-loaded on two devices; 50-sample capture and 20 software-reset/reload checks completed per device.
+- ESP32-S3: ESP-IDF 5.5.1 RAM Probe build verified and physically RAM-loaded on two devices. Both completed 50-sample captures and 20 software-reset/reload checks; the size-optimized image also completed 50-sample captures on both.
 - ESP32-C3, ESP32, ESP32-S2, ESP32-C2, ESP32-C5, ESP32-C6, ESP32-C61, ESP32-H2, ESP32-H21, ESP32-H4, and ESP32-P4: RAM Probe builds verified with ESP-IDF 5.5.1. Physical RAM loading has not been verified for these targets in this checkout.
 - SoC capability fields absent from an ESP-IDF target's headers are reported as unknown where detected; build support does not imply physical validation.
 
@@ -45,10 +45,12 @@ python -c "from host.swid_nonflash import build_ram_probe; print(build_ram_probe
 
 ```powershell
 python host/swid_nonflash.py --list
-python host/swid_nonflash.py --port COM4 --mac 02:00:00:00:00:01 --mode auto
+python host/swid_nonflash.py --mac 3C:0F:02:D9:76:F0 --mode auto
 ```
 
 `auto` reads ROM/eFuse data and uses RAM Probe for targets with a declared build-verified adapter. `rom-only` and `ram-only` select those paths explicitly. No mode writes flash. `flash` reads the pre-existing FP1 application as an optional reference; it is not a flash-writing mode. Full flash SHA-256 comparison is separately opt-in with `--verify-flash` and may take several minutes.
+
+RAM Probe builds default to size optimization and a 4096-byte main task stack. The optimized S3 image was 173920 bytes versus 190960 bytes with the earlier debug configuration; both physical devices retained identical fingerprint values and had 2340 free stack words at the measured high-water mark.
 
 `swid_serialize_fingerprint_input()` encodes the stable fingerprint schema v2. `swid_serialize_manifest()` encodes the complete manifest using its separate schema v1; the two byte streams serve different purposes.
 

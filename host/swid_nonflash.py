@@ -281,12 +281,15 @@ def read_only_rom_inventory(port: str, expected_mac: str | None = None) -> dict:
 
 
 def build_ram_probe(target: str, repeat_count: int = 50,
-                    restart_after_capture: bool = True) -> dict:
+                    restart_after_capture: bool = True,
+                    profile: str = "size") -> dict:
     target = target.lower().replace("-", "")
     if target not in IDF_RAM_CANDIDATES:
         raise RuntimeError(f"RAM probe has no declared ESP-IDF target adapter: {target}")
     if not 1 <= repeat_count <= 100:
         raise ValueError("RAM probe repeat_count must be in 1..100")
+    if profile not in {"default", "size"}:
+        raise ValueError("RAM probe profile must be default or size")
     idf = pathlib.Path(os.environ.get("SWID_IDF_PATH", os.environ.get("IDF_PATH", r"C:\esp\v5.5.1\esp-idf")))
     tools = pathlib.Path(os.environ.get("IDF_TOOLS_PATH", r"C:\Espressif\tools"))
     if not (idf / "tools" / "cmake" / "project.cmake").is_file():
@@ -307,7 +310,7 @@ def build_ram_probe(target: str, repeat_count: int = 50,
     # Keep probe builds separate from legacy experiment caches whose CMake
     # source path points at the pre-consolidation experiments/ tree.
     build_name = target.removeprefix("esp32") or "classic"
-    build = ROOT / "build_probe" / "ram" / build_name
+    build = ROOT / "build_probe" / "ram" / (build_name if profile == "default" else f"{build_name}-{profile}")
     sdkconfig = build / "sdkconfig.nonflash"
     env = dict(os.environ)
     env.update({"IDF_PATH": str(idf), "IDF_TOOLS_PATH": str(tools),
@@ -335,6 +338,8 @@ def build_ram_probe(target: str, repeat_count: int = 50,
     env["PATH"] = str(python.parent) + ";" + str(bin_dir) + ";" + env.get("PATH", "")
     probe_project = ROOT / "probes" / "ram"
     defaults = str(probe_project / "sdkconfig.defaults")
+    if profile == "size":
+        defaults += ";" + str(probe_project / "sdkconfig.defaults.size")
     if target == "esp32s3":
         defaults += ";" + str(probe_project / "sdkconfig.defaults.esp32s3")
     args = [str(cmake), "-G", "Ninja", "-S", str(probe_project), "-B", str(build),
