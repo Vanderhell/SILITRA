@@ -6,6 +6,8 @@ import hashlib
 import json
 import pathlib
 import re
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,7 +20,12 @@ except ImportError:  # Host unit tests can exercise serialization without pyseri
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 OUT = ROOT / "results" / "swid_nonflash_research"
-PYTHON = pathlib.Path(r"C:\Espressif\tools\python\v5.5.1\venv\Scripts\python.exe")
+PYTHON = pathlib.Path(os.environ.get("SWID_PYTHON", r"C:\Espressif\tools\python\v5.5.1\venv\Scripts\python.exe"))
+IDF_RAM_CANDIDATES = {
+    "esp32", "esp32s2", "esp32s3", "esp32c2", "esp32c3", "esp32c5",
+    "esp32c6", "esp32c61", "esp32h2", "esp32h21", "esp32h4", "esp32p4",
+}
+RAM_PROBE_BUILD_VERIFIED_TARGETS = set(IDF_RAM_CANDIDATES)
 
 
 def tlv(field: int, value: bytes) -> bytes:
@@ -77,7 +84,12 @@ def fingerprint(manifest: dict, kind: str) -> tuple[bytes, str]:
 
 
 def run_tool(*args: str, timeout: int = 90) -> str:
-    python = PYTHON if PYTHON.exists() else pathlib.Path(sys.executable)
+    env_python = os.environ.get("IDF_PYTHON_ENV_PATH")
+    candidates = ([pathlib.Path(env_python) / "Scripts" / "python.exe"] if env_python else [])
+    tools_root = pathlib.Path(os.environ.get("IDF_TOOLS_PATH", r"C:\Espressif\tools"))
+    candidates += [PYTHON, tools_root / "python" / "v5.5.1" / "venv" / "Scripts" / "python.exe",
+                   pathlib.Path(sys.executable)]
+    python = next((p for p in candidates if p.exists()), pathlib.Path(sys.executable))
     proc = subprocess.run([str(python), *args], cwd=ROOT, text=True,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
     if proc.returncode:
@@ -129,6 +141,22 @@ def candidates() -> list[dict]:
             for p in list_ports.comports() if p.vid is not None]
 
 
+def resolve_enumerated_port(mac: str, preferred_port: str | None = None,
+                            attempts: int = 40, delay: float = 0.25) -> str:
+    """Wait for USB re-enumeration and prefer the adapter serial matching ROM MAC."""
+    expected = mac.replace(":", "").replace("-", "").upper()
+    for _ in range(attempts):
+        devices = candidates()
+        for item in devices:
+            serial = (item.get("usb_serial") or "").replace(":", "").replace("-", "").upper()
+            if serial == expected:
+                return item["port"]
+        if preferred_port and any(item["port"] == preferred_port for item in devices):
+            return preferred_port
+        time.sleep(delay)
+    raise TimeoutError(f"USB serial interface for {mac} did not re-enumerate")
+
+
 def identify(port: str) -> dict:
     raw = run_tool("-m", "esptool", "--port", port, "--baud", "460800", "chip_id", timeout=45)
     mac = re.search(r"MAC:\s*([0-9a-f:]{17})", raw, re.I)
@@ -143,6 +171,46 @@ def identify(port: str) -> dict:
             "evidence": "ROM_READ"}
 
 
+def identify_expected_device(mac: str, preferred_port: str | None = None,
+                             target: str | None = None, attempts: int = 8) -> dict:
+    """Resolve USB re-enumeration by ROM MAC, never by a remembered COM name alone."""
+    last_error = None
+    for _ in range(attempts):
+        devices = candidates()
+        expected = mac.replace(":", "").replace("-", "").upper()
+        serial_match = [item["port"] for item in devices
+                        if (item.get("usb_serial") or "").replace(":", "").replace("-", "").upper() == expected]
+        ports = [item["port"] for item in devices]
+        ordered = serial_match + ([preferred_port] if preferred_port in ports and preferred_port not in serial_match else [])
+        ordered += [p for p in ports if p not in ordered]
+        for port in ordered:
+            try:
+                result = identify(port)
+            except (RuntimeError, OSError, TimeoutError) as exc:
+                last_error = str(exc)
+                continue
+            if result["mac"].upper() != mac.upper():
+                last_error = f"{port} identifies as {result['mac']}, expected {mac}"
+                continue
+            if target and result["model"].lower().replace("-", "") != target.lower().replace("-", ""):
+                raise RuntimeError(f"ROM target changed on {mac}: {result['model']} != {target}")
+            return result
+        time.sleep(0.5)
+    raise RuntimeError(f"could not rediscover {mac} after USB re-enumeration: {last_error or 'no candidate ports'}")
+
+
+def discover_rom_devices() -> list[dict]:
+    """Identify serial candidates by ROM MAC and return unique ESP32 devices."""
+    found = {}
+    for item in candidates():
+        try:
+            result = identify(item["port"])
+        except (RuntimeError, OSError, TimeoutError):
+            continue
+        found[result["mac"].upper()] = result
+    return list(found.values())
+
+
 def select_backend(mode: str, target: str) -> str:
     aliases = {"rom": "rom-only", "ram": "ram-only"}
     mode = aliases.get(mode, mode)
@@ -151,7 +219,7 @@ def select_backend(mode: str, target: str) -> str:
     if mode != "auto":
         return mode
     normalized = target.lower().replace("-", "")
-    return "ram-only" if normalized in {"esp32c3", "esp32s3"} else "rom-only"
+    return "ram-only" if normalized in RAM_PROBE_BUILD_VERIFIED_TARGETS else "rom-only"
 
 
 def read_only_rom_inventory(port: str, expected_mac: str | None = None) -> dict:
@@ -215,24 +283,56 @@ def read_only_rom_inventory(port: str, expected_mac: str | None = None) -> dict:
 def build_ram_probe(target: str, repeat_count: int = 50,
                     restart_after_capture: bool = True) -> dict:
     target = target.lower().replace("-", "")
-    if target not in {"esp32c3", "esp32s3"}:
-        raise RuntimeError(f"RAM probe target is not build-verified: {target}")
+    if target not in IDF_RAM_CANDIDATES:
+        raise RuntimeError(f"RAM probe has no declared ESP-IDF target adapter: {target}")
     if not 1 <= repeat_count <= 100:
         raise ValueError("RAM probe repeat_count must be in 1..100")
-    idf = pathlib.Path(r"C:\esp\v5.5.1\esp-idf")
-    tools = pathlib.Path(r"C:\Espressif\tools")
-    ninja = pathlib.Path(r"C:\Users\vande\AppData\Local\Microsoft\WinGet\Packages\Ninja-build.Ninja_Microsoft.Winget.Source_8wekyb3d8bbwe\ninja.exe")
-    cmake = pathlib.Path(r"C:\Program Files\CMake\bin\cmake.exe")
+    idf = pathlib.Path(os.environ.get("SWID_IDF_PATH", os.environ.get("IDF_PATH", r"C:\esp\v5.5.1\esp-idf")))
+    tools = pathlib.Path(os.environ.get("IDF_TOOLS_PATH", r"C:\Espressif\tools"))
+    if not (idf / "tools" / "cmake" / "project.cmake").is_file():
+        raise RuntimeError(f"ESP-IDF source tree not found: {idf}")
+
+    def locate_executable(name: str, fallbacks: tuple[pathlib.Path, ...]) -> pathlib.Path:
+        found = shutil.which(name)
+        if found:
+            return pathlib.Path(found)
+        return next((candidate for candidate in fallbacks if candidate.is_file()), pathlib.Path(name))
+
+    ninja = locate_executable("ninja", (tools / "ninja" / "1.12.1" / "ninja.exe",
+        pathlib.Path(r"C:\Users\vande\AppData\Local\Microsoft\WinGet\Packages\Ninja-build.Ninja_Microsoft.Winget.Source_8wekyb3d8bbwe\ninja.exe")))
+    cmake = locate_executable("cmake", (pathlib.Path(r"C:\Program Files\CMake\bin\cmake.exe"),))
+    idf_tools_python = pathlib.Path(os.environ.get("IDF_PYTHON_ENV_PATH", str(tools / "python" / "v5.5.1" / "venv")))
+    python = next((p for p in (idf_tools_python / "Scripts" / "python.exe", PYTHON,
+                               pathlib.Path(sys.executable)) if p.is_file()), pathlib.Path(sys.executable))
     # Keep probe builds separate from legacy experiment caches whose CMake
     # source path points at the pre-consolidation experiments/ tree.
-    build = ROOT / "build_probe" / "ram" / f"{target.removeprefix('esp32')}"
+    build_name = target.removeprefix("esp32") or "classic"
+    build = ROOT / "build_probe" / "ram" / build_name
     sdkconfig = build / "sdkconfig.nonflash"
-    env = dict(__import__("os").environ)
+    env = dict(os.environ)
     env.update({"IDF_PATH": str(idf), "IDF_TOOLS_PATH": str(tools),
-                "IDF_PYTHON_ENV_PATH": str(tools / "python" / "v5.5.1" / "venv")})
-    bin_dir = (ROOT / ".espressif" / "tools" / ("riscv32-esp-elf" if target == "esp32c3" else "xtensa-esp-elf")
-               / "esp-14.2.0_20241119" / ("riscv32-esp-elf" if target == "esp32c3" else "xtensa-esp-elf") / "bin")
-    env["PATH"] = str(tools / "python" / "v5.5.1" / "venv" / "Scripts") + ";" + str(bin_dir) + ";" + env.get("PATH", "")
+                "IDF_PYTHON_ENV_PATH": str(idf_tools_python)})
+    riscv_arch = {
+        "esp32c2": ("rv32imc_zicsr_zifencei", "ilp32"),
+        "esp32c3": ("rv32imc_zicsr_zifencei", "ilp32"),
+        "esp32c5": ("rv32imac_zicsr_zifencei", "ilp32"),
+        "esp32c6": ("rv32imac_zicsr_zifencei", "ilp32"),
+        "esp32c61": ("rv32imac_zicsr_zifencei", "ilp32"),
+        "esp32h2": ("rv32imac_zicsr_zifencei", "ilp32"),
+        "esp32h21": ("rv32imac_zicsr_zifencei", "ilp32"),
+        "esp32h4": ("rv32imafc_zicsr_zifencei", "ilp32f"),
+        "esp32p4": ("rv32imafc_zicsr_zifencei", "ilp32f"),
+    }
+    riscv_targets = set(riscv_arch)
+    toolchain = "riscv32-esp-elf" if target in riscv_targets else "xtensa-esp-elf"
+    compiler_name = "riscv32-esp-elf-gcc.exe" if toolchain.startswith("riscv") else f"xtensa-{target}-elf-gcc.exe"
+    roots = (ROOT / ".espressif" / "tools", tools)
+    bin_dir = next((candidate for root in roots
+                    for candidate in root.glob(f"{toolchain}/*/{toolchain}/bin")
+                    if (candidate / compiler_name).is_file()), None)
+    if bin_dir is None:
+        raise RuntimeError(f"ESP-IDF compiler {compiler_name} not found for {target}; checked {roots}")
+    env["PATH"] = str(python.parent) + ";" + str(bin_dir) + ";" + env.get("PATH", "")
     probe_project = ROOT / "probes" / "ram"
     defaults = str(probe_project / "sdkconfig.defaults")
     if target == "esp32s3":
@@ -241,11 +341,27 @@ def build_ram_probe(target: str, repeat_count: int = 50,
             f"-DIDF_TARGET={target}", f"-DSDKCONFIG={sdkconfig}",
             f"-DSDKCONFIG_DEFAULTS={defaults}",
               f"-DCMAKE_C_FLAGS=-DSWID_RAM_PROBE_REPEAT_COUNT={repeat_count} -DSWID_RAM_PROBE_RESTART_AFTER_CAPTURE={1 if restart_after_capture else 0}",
-            f"-DPYTHON={tools / 'python' / 'v5.5.1' / 'venv' / 'Scripts' / 'python.exe'}"]
-    if target == "esp32c3":
-        cxx = (bin_dir.parent / "riscv32-esp-elf" / "include" / "c++" / "14.2.0" / "riscv32-esp-elf"
-               / "rv32imc_zicsr_zifencei" / "ilp32" / "no-rtti")
-        args.append(f"-DCMAKE_CXX_FLAGS=-isystem{cxx}")
+              f"-DPYTHON={python}"]
+    if target in riscv_arch:
+        toolchain_file = idf / "tools" / "cmake" / f"toolchain-{target}.cmake"
+        flags = toolchain_file.read_text(encoding="utf-8") if toolchain_file.is_file() else ""
+        march_match = re.search(r"-march=([^\s\"]+)", flags)
+        abi_match = re.search(r"-mabi=([^\s\"]+)", flags)
+        arch, abi = riscv_arch[target]
+        if march_match:
+            arch = march_match.group(1)
+            abi = abi_match.group(1) if abi_match else abi
+        compiler_root = bin_dir.parent / "riscv32-esp-elf"
+        cxx_root = compiler_root / "include" / "c++"
+        version_root = next(iter(sorted(cxx_root.glob("*"), reverse=True)), None)
+        arch_root = (version_root / "riscv32-esp-elf") if version_root else pathlib.Path()
+        arch_dir = next((p for p in arch_root.iterdir() if p.is_dir() and arch.startswith(p.name)), None) if arch_root.is_dir() else None
+        if arch_dir is None:
+            raise RuntimeError(f"RISC-V C++ architecture headers not found for -march={arch}")
+        cxx_include = arch_dir / abi / "no-rtti"
+        if not cxx_include.is_dir():
+            raise RuntimeError(f"RISC-V C++ target headers are unavailable: {cxx_include}")
+        args.append(f"-DCMAKE_CXX_FLAGS=-isystem{cxx_include}")
     configure = subprocess.run(args, cwd=ROOT, env=env, text=True, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, timeout=180)
     if configure.returncode:
@@ -293,14 +409,27 @@ def capture_ram_probe(port: str, expected_mac: str, target: str, image: pathlib.
         import serial
     except ImportError as exc:
         raise RuntimeError("pyserial is required for RAM probe capture") from exc
-    rom_identity = identify(port)
+    # A USB Serial/JTAG interface may disappear between discovery and this
+    # call. Resolve by MAC immediately before opening the ROM loader.
+    rom_identity = identify_expected_device(expected_mac, port, target)
+    port = rom_identity["port"]
     if rom_identity["mac"] != expected_mac.upper():
         raise RuntimeError(f"RAM loader identity mismatch: expected {expected_mac}, got {rom_identity['mac']}")
     load_started = time.perf_counter()
     # The esptool RAM stub itself occupies the same internal DRAM window as
     # this IDF RAM image. Use the ROM loader to avoid address overlap.
-    load_output = run_tool("-m", "esptool", "--no-stub", "--chip", target, "--port", port, "--baud", "460800",
-                           "--after", "no_reset", "load_ram", str(image), timeout=90)
+    try:
+        load_output = run_tool("-m", "esptool", "--no-stub", "--chip", target, "--port", port, "--baud", "460800",
+                               "--after", "no_reset", "load_ram", str(image), timeout=90)
+    except RuntimeError as exc:
+        # Some USB Serial/JTAG drivers drop/recreate the COM handle as the RAM
+        # image takes over USB. Treat this as successful transfer only when
+        # esptool confirms every segment was sent and reports its entry point.
+        detail = str(exc)
+        if "All segments done, executing at" not in detail or "Cannot configure port" not in detail:
+            raise
+        load_output = detail
+    port = resolve_enumerated_port(expected_mac, port)
     load_seconds = time.perf_counter() - load_started
     records = []
     console_lines = []
@@ -312,6 +441,7 @@ def capture_ram_probe(port: str, expected_mac: str, target: str, image: pathlib.
             # Opening with a port already assigned briefly asserts DTR on some
             # Windows drivers, resetting USB-Serial/JTAG and discarding the
             # volatile RAM image. Set modem lines before opening the handle.
+            port = resolve_enumerated_port(expected_mac, port, attempts=1, delay=0)
             link = serial.Serial(port=None, baudrate=115200, timeout=0.2, write_timeout=2)
             link.port = port
             link.dtr = False
@@ -517,12 +647,14 @@ def write_backend_summary(result: dict) -> pathlib.Path:
 
 def run_ram_campaign(port: str, expected_mac: str | None,
                      rom_inventory: dict | None = None, repeat_count: int = 50,
-                     verify_flash: bool = False, check_fp1: bool = False) -> dict:
-    ident = identify(port)
+                     verify_flash: bool = False, check_fp1: bool = False,
+                     probe_artifact: dict | None = None) -> dict:
+    ident = identify_expected_device(expected_mac, port) if expected_mac else identify(port)
+    port = ident["port"]
     if expected_mac and ident["mac"] != expected_mac.upper():
         raise RuntimeError(f"MAC mismatch: expected {expected_mac}, got {ident['mac']}")
     target = ident["model"].lower().replace("-", "")
-    if target not in {"esp32c3", "esp32s3"}:
+    if target not in RAM_PROBE_BUILD_VERIFIED_TARGETS:
         raise RuntimeError(f"no RAM build verified for {ident['model']}")
     inventory = rom_inventory or read_only_rom_inventory(port, ident["mac"])
     if inventory.get("identity", {}).get("mac", "").upper() != ident["mac"]:
@@ -531,10 +663,16 @@ def run_ram_campaign(port: str, expected_mac: str | None,
         raise RuntimeError("cached ROM inventory target does not match the live ROM model")
     OUT.mkdir(parents=True, exist_ok=True)
     capacity = (inventory.get("flash") or {}).get("capacity_bytes_reported")
-    baseline = read_flash_hash(port, target, capacity) if verify_flash and capacity else None
+    baseline = None
+    flash_integrity_error = None
+    if verify_flash and capacity:
+        try:
+            baseline = read_flash_hash(port, target, capacity)
+        except (RuntimeError, OSError, TimeoutError) as exc:
+            flash_integrity_error = f"PRE_CAPTURE_READ_FAILED: {exc}"
     if verify_flash and not capacity:
-        raise RuntimeError("flash integrity was requested but ROM did not report capacity")
-    artifact = build_ram_probe(target, repeat_count, restart_after_capture=True)
+        flash_integrity_error = "PRE_CAPTURE_READ_UNAVAILABLE: ROM did not report flash capacity"
+    artifact = probe_artifact or build_ram_probe(target, repeat_count, restart_after_capture=True)
     capture = capture_ram_probe(port, ident["mac"], target, artifact["image"])
     validated = validate_ram_fingerprints(capture["records"])
     flash_reference = None
@@ -544,7 +682,12 @@ def run_ram_campaign(port: str, expected_mac: str | None,
             flash_reference = capture_existing_flash_reference(ident["mac"], target, port, validated)
         except (RuntimeError, OSError, TimeoutError) as exc:
             fp1_error = str(exc)
-    after = read_flash_hash(port, target, capacity) if baseline else None
+    after = None
+    if baseline:
+        try:
+            after = read_flash_hash(port, target, capacity)
+        except (RuntimeError, OSError, TimeoutError) as exc:
+            flash_integrity_error = f"POST_CAPTURE_READ_FAILED: {exc}"
     flash_unchanged = (baseline["sha256"] == after["sha256"]) if baseline and after else None
     final_app_check = None
     if check_fp1 and flash_reference:
@@ -562,6 +705,7 @@ def run_ram_campaign(port: str, expected_mac: str | None,
                         "capture_seconds": capture["capture_seconds"], "ram_write_only": True},
               "baseline_flash": baseline, "post_probe_flash": after,
               "flash_unchanged": flash_unchanged,
+              "flash_integrity_error": flash_integrity_error,
               "capture": capture["records"], "host_validation": validated,
               "flash_firmware_reference": flash_reference,
               "original_flash_app_check": final_app_check,
@@ -588,7 +732,7 @@ def run_ram_campaign(port: str, expected_mac: str | None,
                            "ram_bytes": None, "measurement_seconds": inventory["elapsed_seconds"],
                            "safety_assumptions": ["strict whitelist", "key block payloads excluded", "summary command is read-only"],
                            "flash_unchanged": result["flash_unchanged"], "testing": "PHYSICAL_WHITELISTED_READ_ONLY"},
-        "RAM_PROBE": {"supported_targets_build_verified": ["ESP32-C3", "ESP32-S3"],
+        "RAM_PROBE": {"supported_targets_build_verified": sorted(x.upper() for x in RAM_PROBE_BUILD_VERIFIED_TARGETS),
                       "target_hardware_tested": ident["model"], "fields_observed": len(capture["records"]),
                       "peripheral_capabilities": validated["peripheral_count"],
                       "fingerprints": {k: v["sha256"] for k, v in validated["fingerprints"].items()},
@@ -646,16 +790,15 @@ def run_ram_reset_campaign(port: str, mac: str, target: str, image: pathlib.Path
 
     if baseline_validation.get("repeat_sample_count") != samples_per_reset or not baseline_validation.get("repeat_consistent"):
         raise RuntimeError("RAM Probe build/capture repeat count does not match reset campaign")
-    run_tool("-m", "esptool", "--chip", target, "--port", port, "--baud", "460800",
-             "--after", "hard_reset", "chip_id", timeout=45)
+    current = identify_expected_device(mac, port, target)
+    port = current["port"]
     run_tool("-m", "esptool", "--chip", target, "--port", port, "--baud", "460800",
              "--after", "hard_reset", "chip_id", timeout=45)
     resets = []
     all_samples = []
     for index in range(reset_count):
-        current = identify(port)
-        if current["mac"] != mac.upper() or current["model"].lower().replace("-", "") != target:
-            raise RuntimeError("ROM identity changed before RAM probe load")
+        current = identify_expected_device(mac, port, target)
+        port = current["port"]
         capture = capture_ram_probe(port, mac, target, image)
         if not any(item.get("type") == "software_reset_request" and
                    item.get("method") == "esp_restart" for item in capture["records"]):
@@ -756,21 +899,29 @@ def main() -> int:
     if args.list:
         print(json.dumps(candidates(), indent=2))
         return 0
-    if not args.port:
-        parser.error("--port is required unless --list is used")
+    port = args.port
+    if not port:
+        devices = discover_rom_devices()
+        if args.mac:
+            devices = [item for item in devices if item["mac"].upper() == args.mac.upper()]
+        if len(devices) != 1:
+            raise RuntimeError("automatic selection requires exactly one matching ESP32; found: " +
+                               json.dumps(devices))
+        port = devices[0]["port"]
     mode = args.mode
     if mode == "auto":
-        auto_ident = identify(args.port)
+        auto_ident = identify_expected_device(args.mac, port) if args.mac else identify(port)
+        port = auto_ident["port"]
         if args.mac and auto_ident["mac"] != args.mac.upper():
             raise RuntimeError(f"MAC mismatch: expected {args.mac}, got {auto_ident['mac']}")
         mode = select_backend(mode, auto_ident["model"])
     if mode == "ram-only":
-        result = run_ram_campaign(args.port, args.mac, verify_flash=args.verify_flash,
+        result = run_ram_campaign(port, args.mac, verify_flash=args.verify_flash,
                                   check_fp1=args.check_fp1)
     elif mode == "flash":
-        result = run_existing_flash_backend(args.port, args.mac)
+        result = run_existing_flash_backend(port, args.mac)
     else:
-        result = save_rom_result(args.port, args.mac)
+        result = save_rom_result(port, args.mac)
     if mode == "ram-only":
         summary = {"result_path": result.get("result_path"), "mac": result["identity"]["mac"],
                    "target": result["probe"]["target"], "probe_image_bytes": result["probe"]["image_bytes"],

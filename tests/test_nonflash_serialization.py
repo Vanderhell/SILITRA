@@ -6,7 +6,8 @@ import unittest
 from unittest import mock
 
 from host.swid_nonflash import (fingerprint, parse_safe_efuse_summary, parse_tlv,
-                                run_ram_campaign, select_backend, serialize_v2,
+                                RAM_PROBE_BUILD_VERIFIED_TARGETS, identify_expected_device,
+                                discover_rom_devices, run_ram_campaign, select_backend, serialize_v2,
                                 validate_ram_fingerprints)
 
 
@@ -94,7 +95,9 @@ class NonFlashSerializationTests(unittest.TestCase):
     def test_backend_selection_does_not_default_to_flash(self):
         self.assertEqual(select_backend("auto", "ESP32-S3"), "ram-only")
         self.assertEqual(select_backend("auto", "ESP32-C3"), "ram-only")
-        self.assertEqual(select_backend("auto", "ESP32-C6"), "rom-only")
+        for target in RAM_PROBE_BUILD_VERIFIED_TARGETS:
+            self.assertEqual(select_backend("auto", target), "ram-only")
+        self.assertEqual(select_backend("auto", "ESP32-X99"), "rom-only")
         self.assertEqual(select_backend("flash", "ESP32-S3"), "flash")
         self.assertEqual(select_backend("rom-only", "ESP32-S3"), "rom-only")
 
@@ -107,7 +110,7 @@ class NonFlashSerializationTests(unittest.TestCase):
                                   "tlv_matches_device": True, "sha256_matches_device": True}
         validation = {"manifest": manifest, "fingerprints": fingerprints,
                       "peripheral_count": 34}
-        identity = {"mac": "02:00:00:00:00:01", "model": "ESP32-S3"}
+        identity = {"port": "COM9", "mac": "02:00:00:00:00:01", "model": "ESP32-S3"}
         inventory = {"identity": identity,
                      "flash": {"capacity_bytes_reported": 16 * 1024 * 1024},
                      "elapsed_seconds": 0.01, "efuse_summary": {"safe_fields": {}}}
@@ -121,7 +124,7 @@ class NonFlashSerializationTests(unittest.TestCase):
                        "load_seconds": 0.1, "capture_seconds": 0.2,
                        "software_reset_requested": True}
             with mock.patch("host.swid_nonflash.OUT", pathlib.Path(temp)), \
-                 mock.patch("host.swid_nonflash.identify", return_value=identity), \
+                 mock.patch("host.swid_nonflash.identify_expected_device", return_value=identity), \
                  mock.patch("host.swid_nonflash.read_only_rom_inventory", return_value=inventory), \
                  mock.patch("host.swid_nonflash.build_ram_probe", return_value=artifact), \
                  mock.patch("host.swid_nonflash.capture_ram_probe", return_value=capture), \
@@ -136,6 +139,24 @@ class NonFlashSerializationTests(unittest.TestCase):
             self.assertIsNone(result["flash_firmware_reference"])
             self.assertEqual(result["original_firmware_return"], "RESET_REQUESTED_UNVERIFIED")
             self.assertEqual(result["backend_comparison"]["RAM_PROBE"]["testing"], "PHYSICAL_RAM_ONLY")
+
+    def test_reenumerated_port_is_resolved_by_rom_mac(self):
+        rows = [{"port": "COM7"}, {"port": "COM8"}]
+        expected = {"port": "COM8", "mac": "3C:0F:02:D9:76:F0", "model": "ESP32-S3"}
+        with mock.patch("host.swid_nonflash.candidates", return_value=rows), \
+             mock.patch("host.swid_nonflash.identify", side_effect=[
+                 RuntimeError("stale COM7"), expected]):
+            result = identify_expected_device("3C:0F:02:D9:76:F0", "COM6", "esp32s3", attempts=1)
+        self.assertEqual(result["port"], "COM8")
+
+    def test_rom_discovery_skips_non_esp_serial_ports_and_deduplicates(self):
+        rows = [{"port": "COM1"}, {"port": "COM2"}, {"port": "COM3"}]
+        device = {"port": "COM2", "mac": "3C:0F:02:D9:76:F0", "model": "ESP32-S3"}
+        with mock.patch("host.swid_nonflash.candidates", return_value=rows), \
+             mock.patch("host.swid_nonflash.identify", side_effect=[
+                 RuntimeError("not an ESP32"), device, device]):
+            found = discover_rom_devices()
+        self.assertEqual(found, [device])
 
 
 if __name__ == "__main__":
