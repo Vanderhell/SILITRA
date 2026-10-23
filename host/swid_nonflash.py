@@ -126,7 +126,7 @@ def candidates() -> list[dict]:
         raise RuntimeError("pyserial is required for USB discovery")
     return [{"port": p.device, "vid": p.vid, "pid": p.pid,
              "usb_serial": p.serial_number, "description": p.description}
-            for p in list_ports.comports() if p.device.upper().startswith("COM") and p.vid is not None]
+            for p in list_ports.comports() if p.vid is not None]
 
 
 def identify(port: str) -> dict:
@@ -160,16 +160,29 @@ def read_only_rom_inventory(port: str, expected_mac: str | None = None) -> dict:
     if expected_mac and ident["mac"] != expected_mac.upper():
         raise RuntimeError(f"MAC mismatch: expected {expected_mac}, got {ident['mac']}; no more commands issued")
     target = ident["model"].lower().replace("-", "")
-    flash_text = run_tool("-m", "esptool", "--chip", target, "--port", port,
-                          "--baud", "460800", "flash_id", timeout=60)
+    flash_error = None
+    try:
+        flash_text = run_tool("-m", "esptool", "--chip", target, "--port", port,
+                              "--baud", "460800", "flash_id", timeout=60)
+    except RuntimeError as exc:
+        flash_text = ""
+        flash_error = str(exc)
     manufacturer_match = re.search(r"(?m)^Manufacturer:\s*(?:0x)?([0-9a-f]+)\s*$", flash_text, re.I)
     device_match = re.search(r"(?m)^Device:\s*(?:0x)?([0-9a-f]+)\s*$", flash_text, re.I)
     size_match = re.search(r"Detected flash size:\s*(\d+)\s*MB", flash_text, re.I)
-    safe_summary = run_tool("-m", "espefuse", "--chip", target, "--port", port,
-                            "summary", "--format", "json", *SAFE_EFUSE_QUERY,
-                            *( ["FLASH_CAP", "FLASH_TYPE", "FLASH_VENDOR", "PSRAM_CAP", "PSRAM_VENDOR", "PSRAM_CAP_3", "PSRAM_CAPACITY"] if target == "esp32s3" else []),
-                            timeout=60)
-    safe_fields = parse_safe_efuse_summary(safe_summary)
+    efuse_error = None
+    try:
+        safe_summary = run_tool("-m", "espefuse", "--chip", target, "--port", port,
+                                "summary", "--format", "json", *SAFE_EFUSE_QUERY,
+                                *( ["FLASH_CAP", "FLASH_TYPE", "FLASH_VENDOR", "PSRAM_CAP", "PSRAM_VENDOR", "PSRAM_CAP_3", "PSRAM_CAPACITY"] if target == "esp32s3" else []),
+                                timeout=60)
+        safe_fields = parse_safe_efuse_summary(safe_summary)
+    except (RuntimeError, ValueError) as exc:
+        # ROM and flash identity remain useful when this esptool/espefuse
+        # release does not know a target field or cannot query eFuses.
+        safe_summary = ""
+        safe_fields = {}
+        efuse_error = str(exc)
     mac_field = safe_fields.get("MAC", {}).get("value")
     optional_field = safe_fields.get("OPTIONAL_UNIQUE_ID", {}).get("value")
     if isinstance(mac_field, str):
@@ -177,12 +190,13 @@ def read_only_rom_inventory(port: str, expected_mac: str | None = None) -> dict:
         if mac_match and mac_match.group(1).upper() != ident["mac"]:
             raise RuntimeError("ROM and eFuse MAC disagree")
     return {"schema": 1, "identity": ident,
-            "flash": {"raw_evidence_sha256": hashlib.sha256(flash_text.encode()).hexdigest().upper(),
+            "flash": {"raw_evidence_sha256": hashlib.sha256(flash_text.encode()).hexdigest().upper() if flash_text else None,
                       "jedec_manufacturer": int(manufacturer_match.group(1), 16) if manufacturer_match else None,
                       "jedec_device": int(device_match.group(1), 16) if device_match else None,
                       "jedec_id": ((int(manufacturer_match.group(1), 16) << 16) | int(device_match.group(1), 16)) if manufacturer_match and device_match else None,
                       "capacity_bytes_reported": int(size_match.group(1)) * 1024 * 1024 if size_match else None,
-                      "evidence": "ROM_FLASH_ID"},
+                      "evidence": "ROM_FLASH_ID" if flash_text else "UNAVAILABLE",
+                      "error": flash_error},
             "psram_rom_feature": re.search(r"Embedded PSRAM\s+([0-9]+\s*[KMG]B(?:\s+\([^)]*\))?)", ident.get("rom_features_text") or "", re.I).group(1) if re.search(r"Embedded PSRAM\s+([0-9]+\s*[KMG]B(?:\s+\([^)]*\))?)", ident.get("rom_features_text") or "", re.I) else None,
             "identity_fields": {"optional_unique_id": optional_field,
                                 "optional_unique_id_available": optional_field not in (None, "", 0, "0"),
@@ -190,8 +204,8 @@ def read_only_rom_inventory(port: str, expected_mac: str | None = None) -> dict:
                                 "factory_mac": ident["mac"]},
             "efuse_summary": {"raw_not_persisted": True,
                               "safe_fields": safe_fields,
-                              "output_sha256": hashlib.sha256(safe_summary.encode()).hexdigest().upper(),
-                              "parsed": True,
+                              "output_sha256": hashlib.sha256(safe_summary.encode()).hexdigest().upper() if safe_summary else None,
+                              "parsed": bool(safe_summary), "error": efuse_error,
                               "excluded": "raw efuse words, key blocks, key digests, and secret payloads"},
             "completeness": "PARTIAL", "fingerprints": {k: "UNAVAILABLE" for k in ("silicon", "assembly", "profile")},
             "elapsed_seconds": time.perf_counter() - started,
@@ -502,7 +516,8 @@ def write_backend_summary(result: dict) -> pathlib.Path:
 
 
 def run_ram_campaign(port: str, expected_mac: str | None,
-                     rom_inventory: dict | None = None, repeat_count: int = 50) -> dict:
+                     rom_inventory: dict | None = None, repeat_count: int = 50,
+                     verify_flash: bool = False, check_fp1: bool = False) -> dict:
     ident = identify(port)
     if expected_mac and ident["mac"] != expected_mac.upper():
         raise RuntimeError(f"MAC mismatch: expected {expected_mac}, got {ident['mac']}")
@@ -514,17 +529,29 @@ def run_ram_campaign(port: str, expected_mac: str | None,
         raise RuntimeError("cached ROM inventory identity does not match the live ROM MAC")
     if inventory.get("identity", {}).get("model", "").upper() != ident["model"].upper():
         raise RuntimeError("cached ROM inventory target does not match the live ROM model")
-    capacity = inventory["flash"]["capacity_bytes_reported"]
-    if not capacity:
-        raise RuntimeError("ROM did not report flash capacity; refusing RAM experiment without integrity baseline")
     OUT.mkdir(parents=True, exist_ok=True)
-    baseline = read_flash_hash(port, target, capacity)
+    capacity = (inventory.get("flash") or {}).get("capacity_bytes_reported")
+    baseline = read_flash_hash(port, target, capacity) if verify_flash and capacity else None
+    if verify_flash and not capacity:
+        raise RuntimeError("flash integrity was requested but ROM did not report capacity")
     artifact = build_ram_probe(target, repeat_count, restart_after_capture=True)
     capture = capture_ram_probe(port, ident["mac"], target, artifact["image"])
     validated = validate_ram_fingerprints(capture["records"])
-    flash_reference = capture_existing_flash_reference(ident["mac"], target, port, validated)
-    after = read_flash_hash(port, target, capacity)
-    final_app_check = verify_existing_app_after_probe(ident["mac"], target, port)
+    flash_reference = None
+    fp1_error = None
+    if check_fp1:
+        try:
+            flash_reference = capture_existing_flash_reference(ident["mac"], target, port, validated)
+        except (RuntimeError, OSError, TimeoutError) as exc:
+            fp1_error = str(exc)
+    after = read_flash_hash(port, target, capacity) if baseline else None
+    flash_unchanged = (baseline["sha256"] == after["sha256"]) if baseline and after else None
+    final_app_check = None
+    if check_fp1 and flash_reference:
+        try:
+            final_app_check = verify_existing_app_after_probe(ident["mac"], target, port)
+        except (RuntimeError, OSError, TimeoutError) as exc:
+            fp1_error = str(exc)
     result = {"schema": 1, "identity": ident, "rom_inventory": inventory,
               "probe": {"target": target, "image_bytes": artifact["image_bytes"],
                         "image_sha256": hashlib.sha256(artifact["image"].read_bytes()).hexdigest().upper(),
@@ -534,10 +561,13 @@ def run_ram_campaign(port: str, expected_mac: str | None,
                         "ram_config": artifact["sdkconfig_ram"], "load_seconds": capture["load_seconds"],
                         "capture_seconds": capture["capture_seconds"], "ram_write_only": True},
               "baseline_flash": baseline, "post_probe_flash": after,
-              "flash_unchanged": baseline["sha256"] == after["sha256"],
+              "flash_unchanged": flash_unchanged,
               "capture": capture["records"], "host_validation": validated,
               "flash_firmware_reference": flash_reference,
               "original_flash_app_check": final_app_check,
+              "existing_fp1_reference": "AVAILABLE" if flash_reference else "NOT_AVAILABLE_OR_NOT_REQUESTED",
+              "existing_fp1_error": fp1_error,
+              "original_firmware_return": "RESET_REQUESTED_UNVERIFIED" if capture.get("software_reset_requested") else "NOT_REQUESTED",
               "write_operations_attempted": [], "flash_write_attempted": False,
               "efuse_write_attempted": False, "otp_write_attempted": False,
               "nvs_write_attempted": False}
@@ -570,14 +600,15 @@ def run_ram_campaign(port: str, expected_mac: str | None,
                       "safety_assumptions": ["esptool ROM loader; no-stub RAM transfer", "probe uses RAM and read-only identity APIs", "PSRAM interface initialized with memory test disabled", "no flash/eFuse/OTP/NVS writes"],
                       "flash_unchanged": result["flash_unchanged"], "testing": "PHYSICAL_RAM_ONLY"},
         "FLASH_FIRMWARE": {"supported_targets": ident["model"],
-                           "fields_observed": len(flash_reference["fingerprints"]),
-                           "fingerprints": {k: v["device_digest"] for k, v in flash_reference["fingerprints"].items()},
-                           "device_digest_matches_received_tlv": {k: v["digest_matches_tlv"] for k, v in flash_reference["fingerprints"].items()},
-                           "same_tlv_as_ram_probe": {k: v["tlv_matches_ram_probe"] for k, v in flash_reference["fingerprints"].items()},
+                           "fields_observed": len(flash_reference["fingerprints"]) if flash_reference else 0,
+                           "fingerprints": {k: v["device_digest"] for k, v in flash_reference["fingerprints"].items()} if flash_reference else None,
+                           "device_digest_matches_received_tlv": {k: v["digest_matches_tlv"] for k, v in flash_reference["fingerprints"].items()} if flash_reference else None,
+                           "same_tlv_as_ram_probe": {k: v["tlv_matches_ram_probe"] for k, v in flash_reference["fingerprints"].items()} if flash_reference else None,
                            "ram_bytes": "RUNNING_APP_NOT_PROFILED", "measurement_seconds": None,
                            "safety_assumptions": ["pre-existing firmware only", "FP1 reads plus reset", "no flashing or device provisioning"],
                            "post_probe_application_check": final_app_check,
-                           "flash_unchanged": result["flash_unchanged"], "testing": "EXISTING_APP_READ_ONLY_FP1"},
+                           "flash_unchanged": result["flash_unchanged"],
+                           "testing": "EXISTING_APP_READ_ONLY_FP1" if flash_reference else "NOT_REQUESTED_OR_UNAVAILABLE"},
     }
     result["backend_comparison"] = backends
     dest.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
@@ -597,13 +628,12 @@ def run_ram_reset_campaign(port: str, mac: str, target: str, image: pathlib.Path
     samples_per_reset = repeat_count // reset_count
     if not 1 <= samples_per_reset <= 100:
         raise ValueError("per-reset RAM Probe sampling count must be in 1..100")
-    from host.fp1 import FP1Session
-
     expected = {kind: item["sha256"] for kind, item in baseline_validation["fingerprints"].items()}
     reference = (flash_reference or {}).get("fingerprints", {})
     fp1_baseline = {kind: reference.get(kind, {}).get("device_digest")
                     for kind in ("silicon", "assembly", "profile")}
-    if fp1_baseline["silicon"] != expected["silicon"] or fp1_baseline["assembly"] != expected["assembly"]:
+    if flash_reference and (fp1_baseline["silicon"] != expected["silicon"] or
+                            fp1_baseline["assembly"] != expected["assembly"]):
         raise RuntimeError("saved FP1 reference does not match RAM silicon/assembly fingerprints")
     profile_differences = reference.get("profile", {}).get("tlv_differences_vs_ram", [])
     legacy_radio_delta = (len(profile_differences) == 1 and
@@ -611,7 +641,7 @@ def run_ram_reset_campaign(port: str, mac: str, target: str, image: pathlib.Path
                           profile_differences[0].get("ram_field") == 44 and
                           profile_differences[0].get("flash_value_hex") == "01" and
                           profile_differences[0].get("ram_value_hex") == "00")
-    if fp1_baseline["profile"] != expected["profile"] and not legacy_radio_delta:
+    if flash_reference and fp1_baseline["profile"] != expected["profile"] and not legacy_radio_delta:
         raise RuntimeError("saved FP1/RAM profile differs outside the known legacy Bluetooth Classic field")
 
     if baseline_validation.get("repeat_sample_count") != samples_per_reset or not baseline_validation.get("repeat_consistent"):
@@ -639,35 +669,39 @@ def run_ram_reset_campaign(port: str, mac: str, target: str, image: pathlib.Path
             raise RuntimeError(f"RAM Probe mismatch after software reset cycle {index + 1}")
         all_samples.extend(summaries)
 
-        # The RAM image calls esp_restart() after emitting the completion record.
-        # Confirm the pre-existing app reappears over FP1; this app build does not
-        # expose reset_reason, so the invocation marker plus app recovery are the evidence.
-        after = None
-        last_error = None
-        for _ in range(5):
-            try:
-                with FP1Session(mac, port) as session:
-                    after = session.request("swid_profile", timeout=15)
-                if after.get("valid"):
-                    break
-            except (OSError, TimeoutError) as exc:
-                last_error = str(exc)
-                time.sleep(1)
-        if not after or not after.get("valid"):
-            raise RuntimeError(f"application did not recover after RAM software reset {index + 1}: {last_error}")
-        fp1_values = {"silicon": after.get("silicon_fingerprint"),
-                      "assembly": after.get("assembly_fingerprint"),
-                      "profile": after.get("profile_fingerprint")}
-        if fp1_values != fp1_baseline:
-            raise RuntimeError(f"installed-app fingerprints changed after RAM reset {index + 1}")
+        # RAM probe's explicit esp_restart marker is the reset evidence. The
+        # application that resumes is arbitrary; FP1 is an optional reference.
+        fp1_values = None
+        app_recovered = None
+        if flash_reference:
+            from host.fp1 import FP1Session
+            after = None
+            last_error = None
+            for _ in range(5):
+                try:
+                    with FP1Session(mac, port) as session:
+                        after = session.request("swid_profile", timeout=15)
+                    if after.get("valid"):
+                        break
+                except (OSError, TimeoutError) as exc:
+                    last_error = str(exc)
+                    time.sleep(1)
+            if not after or not after.get("valid"):
+                raise RuntimeError(f"FP1 reference app did not recover after RAM reset {index + 1}: {last_error}")
+            fp1_values = {"silicon": after.get("silicon_fingerprint"),
+                          "assembly": after.get("assembly_fingerprint"),
+                          "profile": after.get("profile_fingerprint")}
+            if fp1_values != fp1_baseline:
+                raise RuntimeError(f"installed-app fingerprints changed after RAM reset {index + 1}")
+            app_recovered = True
 
         row = {"index": index + 1, "software_reset_invocation_confirmed": True,
                "reset_reason": "NOT_EXPOSED_BY_INSTALLED_APP",
-               "reset_evidence": "RAM_PROBE_ESP_RESTART_MARKER_AND_FP1_APP_RECOVERY",
+               "reset_evidence": "RAM_PROBE_ESP_RESTART_MARKER",
                "fp1_fingerprints": fp1_values,
                "ram_probe_reloaded": True, "ram_fingerprints": ram_values,
                "repeat_summary": summaries[0],
-               "ram_matches_baseline": True, "application_recovered": True,
+               "ram_matches_baseline": True, "application_recovered": app_recovered,
                "ram_load_seconds": capture["load_seconds"],
                "ram_capture_seconds": capture["capture_seconds"]}
         resets.append(row)
@@ -684,12 +718,12 @@ def run_ram_reset_campaign(port: str, mac: str, target: str, image: pathlib.Path
             "software_resets_verified": sum(x["software_reset_invocation_confirmed"] for x in resets),
             "ram_probe_reloads_verified": sum(x["ram_probe_reloaded"] for x in resets),
             "reset_observations": resets, "expected_fingerprints": expected,
-            "installed_app_fingerprints": fp1_baseline,
+            "installed_app_fingerprints": fp1_baseline if flash_reference else None,
             "known_legacy_profile_divergence": {"allowed": legacy_radio_delta,
                 "field_id": 44 if legacy_radio_delta else None,
                 "installed_app_value": "01" if legacy_radio_delta else None,
                 "ram_value": "00" if legacy_radio_delta else None},
-            "note": "Each RAM Probe performs repeat_count_per_capture complete SWID collections, emits a software-reset request, calls esp_restart(), and is followed by FP1 recovery verification before the next RAM reload. The installed app does not expose reset_reason. No flash writes are performed."}
+            "note": "Each RAM Probe performs repeat_count_per_capture complete SWID collections, emits a software-reset request and calls esp_restart(). The next iteration confirms ROM loader availability and reloads the RAM image. FP1 recovery is optional and only runs when an FP1 reference is supplied. No flash writes are performed."}
 
 
 def run_existing_flash_backend(port: str, expected_mac: str | None) -> dict:
@@ -714,6 +748,10 @@ def main() -> int:
     parser.add_argument("--list", action="store_true", help="List USB serial devices without connecting")
     parser.add_argument("--mode", choices=("auto", "rom-only", "ram-only", "flash"), default="auto",
                         help="auto prefers ROM+RAM; rom-only reads ROM/eFuse; ram-only adds RAM probe; flash reads installed app only")
+    parser.add_argument("--verify-flash", action="store_true",
+                        help="read complete flash before/after RAM capture and compare SHA-256 (read-only, slow)")
+    parser.add_argument("--check-fp1", action="store_true",
+                        help="optionally compare against an already-installed SWID FP1 app; RAM Probe does not require it")
     args = parser.parse_args()
     if args.list:
         print(json.dumps(candidates(), indent=2))
@@ -727,7 +765,8 @@ def main() -> int:
             raise RuntimeError(f"MAC mismatch: expected {args.mac}, got {auto_ident['mac']}")
         mode = select_backend(mode, auto_ident["model"])
     if mode == "ram-only":
-        result = run_ram_campaign(args.port, args.mac)
+        result = run_ram_campaign(args.port, args.mac, verify_flash=args.verify_flash,
+                                  check_fp1=args.check_fp1)
     elif mode == "flash":
         result = run_existing_flash_backend(args.port, args.mac)
     else:
@@ -738,7 +777,9 @@ def main() -> int:
                    "flash_unchanged": result["flash_unchanged"],
                    "peripheral_count": result["host_validation"]["peripheral_count"],
                    "ram_fingerprints": {k: v["sha256"] for k, v in result["host_validation"]["fingerprints"].items()},
-                   "flash_reference_matches": {k: v["tlv_matches_ram_probe"] for k, v in result["flash_firmware_reference"]["fingerprints"].items()}}
+                   "flash_reference_matches": ({k: v["tlv_matches_ram_probe"] for k, v in result["flash_firmware_reference"]["fingerprints"].items()}
+                                               if result["flash_firmware_reference"] else None),
+                   "original_firmware_return": result["original_firmware_return"]}
         print(json.dumps(summary, indent=2))
     else:
         print(json.dumps(result, indent=2))

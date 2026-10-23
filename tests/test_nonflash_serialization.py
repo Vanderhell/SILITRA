@@ -1,9 +1,13 @@
 import copy
 import json
+import pathlib
+import tempfile
 import unittest
+from unittest import mock
 
 from host.swid_nonflash import (fingerprint, parse_safe_efuse_summary, parse_tlv,
-                                select_backend, serialize_v2, validate_ram_fingerprints)
+                                run_ram_campaign, select_backend, serialize_v2,
+                                validate_ram_fingerprints)
 
 
 def sample_manifest():
@@ -93,6 +97,45 @@ class NonFlashSerializationTests(unittest.TestCase):
         self.assertEqual(select_backend("auto", "ESP32-C6"), "rom-only")
         self.assertEqual(select_backend("flash", "ESP32-S3"), "flash")
         self.assertEqual(select_backend("rom-only", "ESP32-S3"), "rom-only")
+
+    def test_ram_campaign_does_not_require_flash_firmware_or_flash_dump(self):
+        manifest = sample_manifest()
+        fingerprints = {}
+        for kind in ("silicon", "assembly", "profile"):
+            data, digest = fingerprint(manifest, kind)
+            fingerprints[kind] = {"sha256": digest, "tlv_hex": data.hex().upper(),
+                                  "tlv_matches_device": True, "sha256_matches_device": True}
+        validation = {"manifest": manifest, "fingerprints": fingerprints,
+                      "peripheral_count": 34}
+        identity = {"mac": "02:00:00:00:00:01", "model": "ESP32-S3"}
+        inventory = {"identity": identity,
+                     "flash": {"capacity_bytes_reported": 16 * 1024 * 1024},
+                     "elapsed_seconds": 0.01, "efuse_summary": {"safe_fields": {}}}
+        with tempfile.TemporaryDirectory() as temp:
+            image = pathlib.Path(temp) / "probe.bin"
+            image.write_bytes(b"ram probe fixture")
+            artifact = {"image": image, "image_bytes": image.stat().st_size,
+                        "sdkconfig_ram": True, "sdkconfig": pathlib.Path(temp) / "sdkconfig"}
+            capture = {"records": [{"type": "swid_ram_probe", "free_internal_heap": 1000,
+                                    "stack_high_water_words": 300}],
+                       "load_seconds": 0.1, "capture_seconds": 0.2,
+                       "software_reset_requested": True}
+            with mock.patch("host.swid_nonflash.OUT", pathlib.Path(temp)), \
+                 mock.patch("host.swid_nonflash.identify", return_value=identity), \
+                 mock.patch("host.swid_nonflash.read_only_rom_inventory", return_value=inventory), \
+                 mock.patch("host.swid_nonflash.build_ram_probe", return_value=artifact), \
+                 mock.patch("host.swid_nonflash.capture_ram_probe", return_value=capture), \
+                 mock.patch("host.swid_nonflash.validate_ram_fingerprints", return_value=validation), \
+                 mock.patch("host.swid_nonflash.read_flash_hash") as flash_read, \
+                 mock.patch("host.swid_nonflash.capture_existing_flash_reference") as fp1_read, \
+                 mock.patch("host.swid_nonflash.write_backend_summary"):
+                result = run_ram_campaign("COM9", identity["mac"], inventory)
+            flash_read.assert_not_called()
+            fp1_read.assert_not_called()
+            self.assertIsNone(result["flash_unchanged"])
+            self.assertIsNone(result["flash_firmware_reference"])
+            self.assertEqual(result["original_firmware_return"], "RESET_REQUESTED_UNVERIFIED")
+            self.assertEqual(result["backend_comparison"]["RAM_PROBE"]["testing"], "PHYSICAL_RAM_ONLY")
 
 
 if __name__ == "__main__":
