@@ -14,6 +14,8 @@ SWID (Silicon & System Hardware Identity) is a small C11 library for reading doc
 - ESP32-C3, ESP32, ESP32-S2, ESP32-C2, ESP32-C5, ESP32-C6, ESP32-C61, ESP32-H2, ESP32-H21, ESP32-H4, and ESP32-P4: RAM Probe builds verified with ESP-IDF 5.5.1. Physical RAM loading has not been verified for these targets in this checkout.
 - SoC capability fields absent from an ESP-IDF target's headers are reported as unknown where detected; build support does not imply physical validation.
 
+On the two tested ESP32-S3 devices, read-only full-flash SHA-256 matched before and after RAM Probe, and each original application's observable boot markers returned after reset. This evidence applies only to those two device/application combinations; it is not a guarantee for other hardware or security configurations. Other targets' flash integrity and application recovery are unverified.
+
 ## Build and test
 
 With CMake and a C11 compiler:
@@ -73,4 +75,4 @@ Silicon identifies MCU fields. Assembly adds individually identifiable memory co
 
 ## Limitations
 
-Optional Unique ID and flash Unique ID are not guaranteed on every part. Fingerprints over public identifiers remain public, and hashing does not create secrecy or prove entropy. Capability declarations are not functional tests of every peripheral. RAM Probe temporarily takes over execution and may be unavailable when ROM access or device security settings prevent it. External components are included only when their identifiers are explicitly supported.
+Optional Unique ID and flash Unique ID are not guaranteed on every part. Fingerprints over public identifiers remain public; they are neither secret keys nor authentication evidence, and hashing does not create secrecy or prove entropy. Capability declarations are not functional tests of every peripheral. RAM Probe temporarily takes over execution and may be unavailable when ROM access or device security settings prevent it. External components are included only when their identifiers are explicitly supported.
