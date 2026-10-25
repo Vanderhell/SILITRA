@@ -25,7 +25,7 @@
 #endif
 
 static silitra_manifest_t manifest;
-static uint8_t canonical[SILITRA_FINGERPRINT_INPUT_MAX_BYTES];
+static silitra_sha256_input_buffer_t canonical;
 static uint8_t digest[32];
 static char hex[SILITRA_FINGERPRINT_INPUT_MAX_BYTES * 2u + 1u];
 #if SILITRA_RAM_PROBE_PROFILE_TIMINGS
@@ -41,8 +41,8 @@ static silitra_err_t run_bench_operation(unsigned operation) {
     case BENCH_INIT: return silitra_init();
     case BENCH_GET_MANIFEST: return silitra_get_manifest(&manifest);
     case BENCH_MANIFEST_TLV: return silitra_serialize_manifest(&manifest, manifest_tlv, sizeof(manifest_tlv), &manifest_tlv_len);
-    case BENCH_FP_TLV: return silitra_serialize_fingerprint_input(&manifest, benchmark_kind, canonical, sizeof(canonical), &canonical_len);
-    case BENCH_SHA256: return silitra_port_hash256(canonical, canonical_len, digest);
+    case BENCH_FP_TLV: return silitra_serialize_fingerprint_input(&manifest, benchmark_kind, canonical.bytes, sizeof(canonical.bytes), &canonical_len);
+    case BENCH_SHA256: return silitra_port_hash256(canonical.bytes, canonical_len, digest);
     case BENCH_FINGERPRINT: return silitra_get_fingerprint(benchmark_kind, digest);
     default: return SILITRA_ERR_ARG;
     }
@@ -95,12 +95,12 @@ static void to_hex(const uint8_t *in, size_t n, char *out) {
 
 static void emit_fingerprint(silitra_fingerprint_kind_t kind, const char *name) {
     size_t n = 0;
-    if (silitra_serialize_fingerprint_input(&manifest, kind, canonical, sizeof(canonical), &n) != SILITRA_OK ||
-        silitra_port_hash256(canonical, n, digest) != SILITRA_OK || n * 2 >= sizeof(hex)) {
+    if (silitra_serialize_fingerprint_input(&manifest, kind, canonical.bytes, sizeof(canonical.bytes), &n) != SILITRA_OK ||
+        silitra_port_hash256(canonical.bytes, n, digest) != SILITRA_OK || n * 2 >= sizeof(hex)) {
         printf("{\"type\":\"error\",\"operation\":\"fingerprint\",\"kind\":\"%s\"}\n", name);
         return;
     }
-    to_hex(canonical, n, hex);
+    to_hex(canonical.bytes, n, hex);
     char digest_hex[65];
     to_hex(digest, sizeof(digest), digest_hex);
     printf("{\"type\":\"fingerprint\",\"schema\":%u,\"kind\":\"%s\",\"tlv_hex\":\"%s\",\"sha256\":\"%s\"}\n",
@@ -167,10 +167,11 @@ void app_main(void) {
      * Without this handoff pause, the USB console can discard early output. */
     vTaskDelay(pdMS_TO_TICKS(2000));
 
-    printf("{\"type\":\"swid_ram_probe\",\"schema\":%u,\"target\":\"%s\",\"build_type\":\"RAM\",\"flash_write_attempted\":false,\"efuse_write_attempted\":false,\"init_us\":%" PRId64 ",\"free_internal_heap\":%u,\"stack_high_water_bytes\":%u}\n",
+    const unsigned sha_input_alignment = (unsigned)((uintptr_t)canonical.bytes % SILITRA_SHA256_INPUT_ALIGNMENT);
+    printf("{\"type\":\"swid_ram_probe\",\"schema\":%u,\"target\":\"%s\",\"build_type\":\"RAM\",\"flash_write_attempted\":false,\"efuse_write_attempted\":false,\"init_us\":%" PRId64 ",\"free_internal_heap\":%u,\"stack_high_water_bytes\":%u,\"sha_input_alignment_remainder\":%u}\n",
            SILITRA_SCHEMA_VERSION, CONFIG_IDF_TARGET, initialized - begin,
            (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-           (unsigned)uxTaskGetStackHighWaterMark(NULL));
+           (unsigned)uxTaskGetStackHighWaterMark(NULL), sha_input_alignment);
     printf("{\"type\":\"chip\",\"family\":%u,\"model\":%u,\"revision\":%u,\"cores\":%u,\"package\":%u,\"features\":%" PRIu32 ",\"status\":%u,\"evidence\":%u}\n",
            manifest.chip.family, manifest.chip.model, manifest.chip.revision, manifest.chip.cores,
            manifest.chip.package, manifest.chip.features, manifest.chip.status, manifest.chip.evidence);

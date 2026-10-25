@@ -97,6 +97,7 @@ class NonFlashSerializationTests(unittest.TestCase):
     def test_repeat_summary_must_match_canonical_capture_hashes(self):
         manifest = sample_manifest()
         records = [
+            {"type": "swid_ram_probe", "sha_input_alignment_remainder": 0},
             {"type": "chip", **manifest["chip"]},
             {"type": "identity", **manifest["identity"]},
             {"type": "memory", "jedec": manifest["memory"]["flash_jedec"],
@@ -132,6 +133,9 @@ class NonFlashSerializationTests(unittest.TestCase):
         result = validate_ram_fingerprints(records)
         self.assertFalse(result["repeat_consistent"])
         self.assertEqual(result["repeat_sample_count"], 50)
+        records[0]["sha_input_alignment_remainder"] = 1
+        with self.assertRaisesRegex(RuntimeError, "SHA input buffer is not aligned"):
+            validate_ram_fingerprints(records)
 
     def test_tlv_parser_preserves_repeat_fields(self):
         encoded = bytes((50, 2, 0, 0xAA, 0xBB, 50, 1, 0, 0xCC))

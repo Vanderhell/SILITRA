@@ -533,6 +533,9 @@ def capture_ram_probe(port: str, expected_mac: str, target: str, image: pathlib.
 
 def validate_ram_fingerprints(records: list[dict]) -> dict:
     by_type = {item.get("type"): item for item in records}
+    probe_info = by_type.get("swid_ram_probe")
+    if probe_info and probe_info.get("sha_input_alignment_remainder", 0) != 0:
+        raise RuntimeError("RAM Probe SHA input buffer is not aligned for the target ROM SHA implementation")
     chip, identity, memory, radio = (by_type.get(k) for k in ("chip", "identity", "memory", "radio"))
     peripherals = [item for item in records if item.get("type") == "peripheral"]
     fp_records = {item.get("kind"): item for item in records if item.get("type") == "fingerprint"}

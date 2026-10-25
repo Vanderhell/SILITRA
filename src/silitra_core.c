@@ -196,9 +196,8 @@ swid_err_t swid_serialize_manifest(const swid_manifest_t *m, uint8_t *out, size_
 swid_err_t swid_serialize_fingerprint_input(const swid_manifest_t *m, swid_fingerprint_kind_t kind, uint8_t *out, size_t n, size_t *written) { return silitra_serialize_fingerprint_input(m, (silitra_fingerprint_kind_t)kind, out, n, written); }
 
 silitra_err_t silitra_get_fingerprint(silitra_fingerprint_kind_t kind, uint8_t out[32]) {
-    /* Keep the serialized input word-aligned without shared mutable storage. */
-    _Alignas(4) uint8_t canonical[SILITRA_FINGERPRINT_INPUT_MAX_BYTES]; size_t written = 0; if (!out) return SILITRA_ERR_ARG; if (!g_initialized) return SILITRA_ERR_NOT_INITIALIZED;
+    silitra_sha256_input_buffer_t canonical; size_t written = 0; if (!out) return SILITRA_ERR_ARG; if (!g_initialized) return SILITRA_ERR_NOT_INITIALIZED;
     if (kind < SILITRA_FP_SILICON || kind > SILITRA_FP_PROFILE) return SILITRA_ERR_ARG;
-    silitra_err_t err = serialize_kind(&g_manifest, kind, canonical, sizeof(canonical), &written); if (err != SILITRA_OK) return err;
-    return silitra_port_hash256(canonical, written, out);
+    silitra_err_t err = serialize_kind(&g_manifest, kind, canonical.bytes, sizeof(canonical.bytes), &written); if (err != SILITRA_OK) return err;
+    return silitra_port_hash256(canonical.bytes, written, out);
 }

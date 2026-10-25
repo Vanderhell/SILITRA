@@ -7,7 +7,11 @@
 #include <string.h>
 
 int main(void) {
-    silitra_manifest_t m, changed, invalid; uint8_t a[32], b[32], buf[4096], manifest_a[4096], manifest_b[4096], profile_a[4096], profile_b[4096], assembly_a[4096], assembly_b[4096], bounded_profile[SILITRA_FINGERPRINT_INPUT_MAX_BYTES]; size_t n = 0, na = 0, nb = 0;
+    silitra_manifest_t m, changed, invalid; uint8_t a[32], b[32];
+    _Alignas(SILITRA_SHA256_INPUT_ALIGNMENT) uint8_t buf[4096];
+    uint8_t manifest_a[4096], manifest_b[4096], profile_a[4096], profile_b[4096], assembly_a[4096], assembly_b[4096], bounded_profile[SILITRA_FINGERPRINT_INPUT_MAX_BYTES]; size_t n = 0, na = 0, nb = 0;
+    assert(((uintptr_t)buf % SILITRA_SHA256_INPUT_ALIGNMENT) == 0u);
+    assert(silitra_port_hash256(buf + 1, 1, a) == SILITRA_ERR_ARG);
     assert(silitra_get_manifest(&m) == SILITRA_ERR_NOT_INITIALIZED);
     assert(silitra_init() == SILITRA_OK);
     assert(silitra_get_manifest(&m) == SILITRA_OK);

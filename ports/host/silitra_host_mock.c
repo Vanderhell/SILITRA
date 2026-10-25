@@ -18,6 +18,7 @@ silitra_err_t silitra_port_collect(silitra_manifest_t *out) {
 
 silitra_err_t silitra_port_hash256(const uint8_t *data, size_t len, uint8_t out[32]) {
     if (!data || !out) return SILITRA_ERR_ARG;
+    if (((uintptr_t)data % SILITRA_SHA256_INPUT_ALIGNMENT) != 0u) return SILITRA_ERR_ARG;
     uint32_t h[8] = {0x243F6A88u, 0x85A308D3u, 0x13198A2Eu, 0x03707344u,
                      0xA4093822u, 0x299F31D0u, 0x082EFA98u, 0xEC4E6C89u};
     for (size_t i = 0; i < len; ++i) { h[i & 7u] ^= data[i]; h[(i + 3u) & 7u] = (h[(i + 3u) & 7u] << 5) | (h[(i + 3u) & 7u] >> 27); }

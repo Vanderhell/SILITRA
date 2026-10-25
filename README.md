@@ -2,6 +2,8 @@
 
 SILITRA (Silicon Identity & Traceability) is an embedded C11 hardware identity library for Espressif ESP32 MCUs. It reads documented device and memory properties, exposes a stable manifest, and calculates deterministic SHA-256 fingerprints without mandatory heap allocation.
 
+Current release: `v2.0.1`.
+
 ## Features
 
 - Silicon, Assembly, and Hardware Profile fingerprints.

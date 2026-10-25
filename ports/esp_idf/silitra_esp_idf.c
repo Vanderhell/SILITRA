@@ -374,6 +374,7 @@ silitra_err_t silitra_port_collect(silitra_manifest_t *out) {
 
 silitra_err_t silitra_port_hash256(const uint8_t *data, size_t len, uint8_t out[32]) {
     if (!data || !out) return SILITRA_ERR_ARG;
+    if (((uintptr_t)data % SILITRA_SHA256_INPUT_ALIGNMENT) != 0u) return SILITRA_ERR_ARG;
 #if defined(CONFIG_IDF_TARGET_ESP32)
     if (len > (SIZE_MAX / 8u)) return SILITRA_ERR_ARG;
     SHA_CTX ctx;
