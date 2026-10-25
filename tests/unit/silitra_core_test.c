@@ -2,6 +2,7 @@
 /* Copyright 2026 Vanderhell */
 #include "silitra.h"
 #include "swid.h"
+#include "silitra_port.h"
 #include <assert.h>
 #include <string.h>
 
@@ -17,10 +18,25 @@ int main(void) {
     uint8_t legacy_buf[4096]; size_t legacy_n = 0;
     assert(swid_serialize_manifest(&m, legacy_buf, sizeof(legacy_buf), &legacy_n) == SWID_OK);
     assert(n == legacy_n && memcmp(buf, legacy_buf, n) == 0);
-    assert(silitra_get_fingerprint(SILITRA_FP_SILICON, a) == SILITRA_OK);
-    assert(swid_get_fingerprint(SWID_FP_SILICON, b) == SWID_OK);
-    assert(memcmp(a, b, sizeof(a)) == 0);
-    for (int i = 0; i < 1000; ++i) { assert(silitra_get_fingerprint(SILITRA_FP_SILICON, b) == SILITRA_OK); assert(memcmp(a, b, sizeof(a)) == 0); }
+    static const silitra_fingerprint_kind_t kinds[] = {
+        SILITRA_FP_SILICON, SILITRA_FP_ASSEMBLY, SILITRA_FP_PROFILE
+    };
+    for (size_t kind = 0; kind < sizeof(kinds) / sizeof(kinds[0]); ++kind) {
+        size_t input_len = 0;
+        assert(silitra_serialize_fingerprint_input(&m, kinds[kind], buf, sizeof(buf), &input_len) == SILITRA_OK);
+        assert(silitra_port_hash256(buf, input_len, a) == SILITRA_OK);
+        assert(silitra_get_fingerprint(kinds[kind], b) == SILITRA_OK);
+        assert(memcmp(a, b, sizeof(a)) == 0);
+        if (kinds[kind] == SILITRA_FP_SILICON) {
+            uint8_t legacy[32];
+            assert(swid_get_fingerprint(SWID_FP_SILICON, legacy) == SWID_OK);
+            assert(memcmp(a, legacy, sizeof(a)) == 0);
+        }
+        for (int i = 0; i < 1000; ++i) {
+            assert(silitra_get_fingerprint(kinds[kind], b) == SILITRA_OK);
+            assert(memcmp(a, b, sizeof(a)) == 0);
+        }
+    }
     m.identity.base_mac_valid = 1;
     m.identity.optional_uid_valid = 1;
     m.peripherals.count = 2;

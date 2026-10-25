@@ -94,6 +94,45 @@ class NonFlashSerializationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_tlv(bytes((50, 2, 0, 0xAA)))
 
+    def test_repeat_summary_must_match_canonical_capture_hashes(self):
+        manifest = sample_manifest()
+        records = [
+            {"type": "chip", **manifest["chip"]},
+            {"type": "identity", **manifest["identity"]},
+            {"type": "memory", "jedec": manifest["memory"]["flash_jedec"],
+             "flash_capacity": manifest["memory"]["flash_capacity_bytes"],
+             "flash_uid": manifest["memory"]["flash_unique_id"],
+             "flash_uid_valid": manifest["memory"]["flash_unique_id_valid"],
+             "psram_capacity": manifest["memory"]["psram_capacity_bytes"],
+             "psram_present": manifest["memory"]["psram_present"],
+             "psram_interface": manifest["memory"]["psram_interface"],
+             "psram_location": manifest["memory"]["psram_location"]},
+            {"type": "radio", "wifi": manifest["radio"]["wifi_supported"],
+             "wifi_generation": manifest["radio"]["wifi_generation"],
+             "bluetooth": manifest["radio"]["bluetooth_supported"],
+             "ble": manifest["radio"]["ble_supported"],
+             "bt_classic": manifest["radio"]["bt_classic_supported"]},
+            {"type": "peripheral_count", "count": len(manifest["peripherals"])},
+        ]
+        for item in manifest["peripherals"]:
+            records.append({"type": "peripheral", "peripheral_type": item["type"],
+                            "supported": item["supported"], "controllers": item["controllers"],
+                            "channels": item["channels"], "feature_flags": item["feature_flags"],
+                            "status": item["status"], "evidence": item["evidence"]})
+        for kind in ("silicon", "assembly", "profile"):
+            data, digest = fingerprint(manifest, kind)
+            records.append({"type": "fingerprint", "kind": kind,
+                            "tlv_hex": data.hex().upper(), "sha256": digest})
+        records.append({"type": "repeat_summary", "count": 50,
+                        "silicon_mismatches": 0, "assembly_mismatches": 0,
+                        "profile_mismatches": 0,
+                        "first_silicon": "00" * 32, "last_silicon": "00" * 32,
+                        "first_assembly": "00" * 32, "last_assembly": "00" * 32,
+                        "first_profile": "00" * 32, "last_profile": "00" * 32})
+        result = validate_ram_fingerprints(records)
+        self.assertFalse(result["repeat_consistent"])
+        self.assertEqual(result["repeat_sample_count"], 50)
+
     def test_tlv_parser_preserves_repeat_fields(self):
         encoded = bytes((50, 2, 0, 0xAA, 0xBB, 50, 1, 0, 0xCC))
         self.assertEqual(parse_tlv(encoded), [(50, b"\xAA\xBB"), (50, b"\xCC")])
@@ -115,7 +154,8 @@ class NonFlashSerializationTests(unittest.TestCase):
             fingerprints[kind] = {"sha256": digest, "tlv_hex": data.hex().upper(),
                                   "tlv_matches_device": True, "sha256_matches_device": True}
         validation = {"manifest": manifest, "fingerprints": fingerprints,
-                      "peripheral_count": 34}
+                      "peripheral_count": 34, "complete": True,
+                      "repeat_consistent": True}
         identity = {"port": "COM9", "mac": "02:00:00:00:00:01", "model": "ESP32-S3"}
         inventory = {"identity": identity,
                      "flash": {"capacity_bytes_reported": 16 * 1024 * 1024},
@@ -143,6 +183,7 @@ class NonFlashSerializationTests(unittest.TestCase):
             fp1_read.assert_not_called()
             self.assertIsNone(result["flash_unchanged"])
             self.assertIsNone(result["flash_firmware_reference"])
+            self.assertEqual(result["validation_status"], "PASS")
             self.assertEqual(result["original_firmware_return"], "RESET_REQUESTED_UNVERIFIED")
             self.assertEqual(result["backend_comparison"]["RAM_PROBE"]["testing"], "PHYSICAL_RAM_ONLY")
 

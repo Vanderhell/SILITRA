@@ -761,6 +761,9 @@ def run_ram_campaign(port: str, expected_mac: str | None,
               "flash_integrity_error": flash_integrity_error,
               "capture": capture["records"], "host_validation": validated,
               "flash_firmware_reference": flash_reference,
+              "validation_status": "PASS" if validated.get("complete") and validated.get("repeat_consistent") else "FAIL",
+              "validation_failure": None if validated.get("complete") and validated.get("repeat_consistent") else
+                  "capture completeness or repeated fingerprints do not match canonical capture fingerprints",
               "original_flash_app_check": final_app_check,
               "existing_fp1_reference": "AVAILABLE" if flash_reference else "NOT_AVAILABLE_OR_NOT_REQUESTED",
               "existing_fp1_error": fp1_error,
@@ -982,6 +985,7 @@ def main() -> int:
     if mode == "ram-only":
         summary = {"result_path": result.get("result_path"), "mac": result["identity"]["mac"],
                    "target": result["probe"]["target"], "probe_image_bytes": result["probe"]["image_bytes"],
+                   "validation_status": result["validation_status"],
                    "flash_unchanged": result["flash_unchanged"],
                    "peripheral_count": result["host_validation"]["peripheral_count"],
                    "ram_fingerprints": {k: v["sha256"] for k, v in result["host_validation"]["fingerprints"].items()},
