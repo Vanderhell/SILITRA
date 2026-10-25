@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Vanderhell */
 /* Test-only port. It intentionally uses a non-cryptographic digest so host
  * unit tests never imply production cryptographic support. ESP-IDF uses the
  * ROM SHA-256 port in swid_esp_idf.c. */

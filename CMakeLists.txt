@@ -20,7 +20,7 @@ set(EXTRA_COMPONENT_DIRS
     "${CMAKE_CURRENT_LIST_DIR}/firmware/main"
     "${CMAKE_CURRENT_LIST_DIR}/components/swid")
 set(COMPONENTS main swid)
-set(PROJECT_VER "1.0.1")
+set(PROJECT_VER "1.0.2")
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 project(swid)
