@@ -8,7 +8,8 @@ from unittest import mock
 from host.silitra import (fingerprint, parse_safe_efuse_summary, parse_tlv,
                                 RAM_PROBE_BUILD_VERIFIED_TARGETS, identify_expected_device,
                                 discover_rom_devices, run_ram_campaign, select_backend, serialize_v2,
-                                validate_ram_fingerprints, _find_idf_python, _idf_tools_root)
+                                validate_ram_fingerprints, _find_idf_python, _idf_tools_root,
+                                _toolchain_has_compiler_frontends)
 
 
 def sample_manifest():
@@ -213,6 +214,19 @@ class NonFlashSerializationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp, mock.patch.dict(
                 "os.environ", {"IDF_TOOLS_PATH": temp}):
             self.assertEqual(_idf_tools_root(), pathlib.Path(temp))
+
+    def test_incomplete_gcc_driver_is_not_selected_without_frontends(self):
+        with tempfile.TemporaryDirectory() as temp:
+            bin_dir = pathlib.Path(temp) / "xtensa-esp-elf" / "esp-14" / "xtensa-esp-elf" / "bin"
+            frontend_dir = (bin_dir.parent / "libexec" / "gcc" /
+                            "xtensa-esp-elf" / "14.2.0")
+            bin_dir.mkdir(parents=True)
+            frontend_dir.mkdir(parents=True)
+            (bin_dir / "xtensa-esp32s3-elf-gcc.exe").touch()
+            self.assertFalse(_toolchain_has_compiler_frontends(bin_dir, "xtensa-esp-elf"))
+            (frontend_dir / "cc1.exe").touch()
+            (frontend_dir / "cc1plus.exe").touch()
+            self.assertTrue(_toolchain_has_compiler_frontends(bin_dir, "xtensa-esp-elf"))
 
     def test_python_override_is_portable_and_takes_precedence(self):
         with tempfile.TemporaryDirectory() as temp:

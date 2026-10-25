@@ -125,6 +125,19 @@ def _find_idf_python() -> pathlib.Path:
     return next((candidate for candidate in candidates if candidate.is_file()), pathlib.Path(sys.executable))
 
 
+def _toolchain_has_compiler_frontends(bin_dir: pathlib.Path, toolchain: str) -> bool:
+    """Reject partially installed GCC trees whose driver exists but cc1 is missing."""
+    compiler_root = bin_dir.parent
+    frontend_root = compiler_root / "libexec" / "gcc" / toolchain
+    if not frontend_root.is_dir():
+        return False
+    def has_frontend(version_dir: pathlib.Path, name: str) -> bool:
+        return any((version_dir / filename).is_file() for filename in (name, f"{name}.exe"))
+
+    return any(has_frontend(version_dir, "cc1") and has_frontend(version_dir, "cc1plus")
+               for version_dir in frontend_root.iterdir() if version_dir.is_dir())
+
+
 SAFE_EFUSE_FIELDS = {
     "MAC", "OPTIONAL_UNIQUE_ID", "CHIP_VER_REV1", "CHIP_VER_REV2", "CHIP_VER_REV3",
     "CHIP_VER_PKG", "PKG_VERSION", "WAFER_VERSION_MAJOR", "WAFER_VERSION_MINOR",
@@ -382,6 +395,8 @@ def build_ram_probe(target: str, repeat_count: int = 50,
     for root in tool_roots:
         for candidate in root.glob(f"{toolchain}/*/{toolchain}/bin"):
             if not any((candidate / name).is_file() for name in compiler_names):
+                continue
+            if not _toolchain_has_compiler_frontends(candidate, toolchain):
                 continue
             if target in riscv_arch:
                 compiler_root = candidate.parent / "riscv32-esp-elf"
