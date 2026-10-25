@@ -8,7 +8,7 @@ from unittest import mock
 from host.swid_nonflash import (fingerprint, parse_safe_efuse_summary, parse_tlv,
                                 RAM_PROBE_BUILD_VERIFIED_TARGETS, identify_expected_device,
                                 discover_rom_devices, run_ram_campaign, select_backend, serialize_v2,
-                                validate_ram_fingerprints)
+                                validate_ram_fingerprints, _find_idf_python, _idf_tools_root)
 
 
 def sample_manifest():
@@ -142,21 +142,33 @@ class NonFlashSerializationTests(unittest.TestCase):
 
     def test_reenumerated_port_is_resolved_by_rom_mac(self):
         rows = [{"port": "COM7"}, {"port": "COM8"}]
-        expected = {"port": "COM8", "mac": "3C:0F:02:D9:76:F0", "model": "ESP32-S3"}
+        expected = {"port": "COM8", "mac": "02:00:00:00:00:0A", "model": "ESP32-S3"}
         with mock.patch("host.swid_nonflash.candidates", return_value=rows), \
              mock.patch("host.swid_nonflash.identify", side_effect=[
                  RuntimeError("stale COM7"), expected]):
-            result = identify_expected_device("3C:0F:02:D9:76:F0", "COM6", "esp32s3", attempts=1)
+            result = identify_expected_device("02:00:00:00:00:0A", "COM6", "esp32s3", attempts=1)
         self.assertEqual(result["port"], "COM8")
 
     def test_rom_discovery_skips_non_esp_serial_ports_and_deduplicates(self):
         rows = [{"port": "COM1"}, {"port": "COM2"}, {"port": "COM3"}]
-        device = {"port": "COM2", "mac": "3C:0F:02:D9:76:F0", "model": "ESP32-S3"}
+        device = {"port": "COM2", "mac": "02:00:00:00:00:0A", "model": "ESP32-S3"}
         with mock.patch("host.swid_nonflash.candidates", return_value=rows), \
              mock.patch("host.swid_nonflash.identify", side_effect=[
                  RuntimeError("not an ESP32"), device, device]):
             found = discover_rom_devices()
         self.assertEqual(found, [device])
+
+    def test_idf_tools_root_uses_exported_environment(self):
+        with tempfile.TemporaryDirectory() as temp, mock.patch.dict(
+                "os.environ", {"IDF_TOOLS_PATH": temp}):
+            self.assertEqual(_idf_tools_root(), pathlib.Path(temp))
+
+    def test_python_override_is_portable_and_takes_precedence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            override = pathlib.Path(temp) / "python"
+            override.write_bytes(b"test executable placeholder")
+            with mock.patch.dict("os.environ", {"SWID_PYTHON": str(override)}):
+                self.assertEqual(_find_idf_python(), override)
 
 
 if __name__ == "__main__":

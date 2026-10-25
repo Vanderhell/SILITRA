@@ -20,7 +20,6 @@ except ImportError:  # Host unit tests can exercise serialization without pyseri
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 OUT = ROOT / "results" / "swid_nonflash_research"
-PYTHON = pathlib.Path(os.environ.get("SWID_PYTHON", r"C:\Espressif\tools\python\v5.5.1\venv\Scripts\python.exe"))
 IDF_RAM_CANDIDATES = {
     "esp32", "esp32s2", "esp32s3", "esp32c2", "esp32c3", "esp32c5",
     "esp32c6", "esp32c61", "esp32h2", "esp32h21", "esp32h4", "esp32p4",
@@ -84,17 +83,46 @@ def fingerprint(manifest: dict, kind: str) -> tuple[bytes, str]:
 
 
 def run_tool(*args: str, timeout: int = 90) -> str:
-    env_python = os.environ.get("IDF_PYTHON_ENV_PATH")
-    candidates = ([pathlib.Path(env_python) / "Scripts" / "python.exe"] if env_python else [])
-    tools_root = pathlib.Path(os.environ.get("IDF_TOOLS_PATH", r"C:\Espressif\tools"))
-    candidates += [PYTHON, tools_root / "python" / "v5.5.1" / "venv" / "Scripts" / "python.exe",
-                   pathlib.Path(sys.executable)]
-    python = next((p for p in candidates if p.exists()), pathlib.Path(sys.executable))
+    python = _find_idf_python()
     proc = subprocess.run([str(python), *args], cwd=ROOT, text=True,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
     if proc.returncode:
         raise RuntimeError(f"read-only tool failed ({proc.returncode}): {' '.join(args)}\n{proc.stdout}")
     return proc.stdout
+
+
+def _idf_tools_roots() -> tuple[pathlib.Path, ...]:
+    configured = os.environ.get("IDF_TOOLS_PATH")
+    candidates = ([pathlib.Path(configured)] if configured else [])
+    candidates.append(pathlib.Path.home() / ".espressif" / "tools")
+    roots = []
+    for candidate in candidates:
+        if candidate.is_dir() and candidate not in roots:
+            roots.append(candidate)
+    return tuple(roots)
+
+
+def _idf_tools_root() -> pathlib.Path:
+    roots = _idf_tools_roots()
+    if roots:
+        return roots[0]
+    raise RuntimeError("ESP-IDF tools were not found; export IDF_TOOLS_PATH or install them under ~/.espressif/tools")
+
+
+def _find_idf_python() -> pathlib.Path:
+    candidates: list[pathlib.Path] = []
+    env_path = os.environ.get("IDF_PYTHON_ENV_PATH")
+    if env_path:
+        env_dir = pathlib.Path(env_path)
+        candidates.extend((env_dir / "Scripts" / "python.exe", env_dir / "bin" / "python"))
+    override = os.environ.get("SWID_PYTHON")
+    if override:
+        candidates.append(pathlib.Path(override))
+    for tools_root in _idf_tools_roots():
+        for venv in sorted((tools_root / "python").glob("*/venv"), reverse=True):
+            candidates.extend((venv / "Scripts" / "python.exe", venv / "bin" / "python"))
+    candidates.append(pathlib.Path(sys.executable))
+    return next((candidate for candidate in candidates if candidate.is_file()), pathlib.Path(sys.executable))
 
 
 SAFE_EFUSE_FIELDS = {
@@ -290,8 +318,11 @@ def build_ram_probe(target: str, repeat_count: int = 50,
         raise ValueError("RAM probe repeat_count must be in 1..100")
     if profile not in {"default", "size", "profile"}:
         raise ValueError("RAM probe profile must be default, size, or profile")
-    idf = pathlib.Path(os.environ.get("SWID_IDF_PATH", os.environ.get("IDF_PATH", r"C:\esp\v5.5.1\esp-idf")))
-    tools = pathlib.Path(os.environ.get("IDF_TOOLS_PATH", r"C:\Espressif\tools"))
+    idf_value = os.environ.get("SWID_IDF_PATH") or os.environ.get("IDF_PATH")
+    if not idf_value:
+        raise RuntimeError("ESP-IDF was not exported; set IDF_PATH or SWID_IDF_PATH before building the RAM Probe")
+    idf = pathlib.Path(idf_value)
+    tools = _idf_tools_root()
     if not (idf / "tools" / "cmake" / "project.cmake").is_file():
         raise RuntimeError(f"ESP-IDF source tree not found: {idf}")
 
@@ -301,12 +332,16 @@ def build_ram_probe(target: str, repeat_count: int = 50,
             return pathlib.Path(found)
         return next((candidate for candidate in fallbacks if candidate.is_file()), pathlib.Path(name))
 
-    ninja = locate_executable("ninja", (tools / "ninja" / "1.12.1" / "ninja.exe",
-        pathlib.Path(r"C:\Users\vande\AppData\Local\Microsoft\WinGet\Packages\Ninja-build.Ninja_Microsoft.Winget.Source_8wekyb3d8bbwe\ninja.exe")))
-    cmake = locate_executable("cmake", (pathlib.Path(r"C:\Program Files\CMake\bin\cmake.exe"),))
-    idf_tools_python = pathlib.Path(os.environ.get("IDF_PYTHON_ENV_PATH", str(tools / "python" / "v5.5.1" / "venv")))
-    python = next((p for p in (idf_tools_python / "Scripts" / "python.exe", PYTHON,
-                               pathlib.Path(sys.executable)) if p.is_file()), pathlib.Path(sys.executable))
+    tool_roots = _idf_tools_roots()
+    ninja_fallbacks = tuple(candidate for root in tool_roots
+                            for pattern in ("ninja/*/ninja", "ninja/*/ninja.exe")
+                            for candidate in root.glob(pattern))
+    ninja = locate_executable("ninja", ninja_fallbacks)
+    cmake = locate_executable("cmake", ())
+    python = _find_idf_python()
+    idf_python_env = os.environ.get("IDF_PYTHON_ENV_PATH")
+    if not idf_python_env and python.parent.name in {"Scripts", "bin"} and python.parent.parent.name == "venv":
+        idf_python_env = str(python.parent.parent)
     # Keep probe builds separate from legacy experiment caches whose CMake
     # source path points at the pre-consolidation experiments/ tree.
     build_name = target.removeprefix("esp32") or "classic"
@@ -317,8 +352,9 @@ def build_ram_probe(target: str, repeat_count: int = 50,
     build = ROOT / "build_probe" / "ram" / (build_suffix if profile == "default" else f"{build_suffix}-{profile}")
     sdkconfig = build / "sdkconfig.nonflash"
     env = dict(os.environ)
-    env.update({"IDF_PATH": str(idf), "IDF_TOOLS_PATH": str(tools),
-                "IDF_PYTHON_ENV_PATH": str(idf_tools_python)})
+    env.update({"IDF_PATH": str(idf), "IDF_TOOLS_PATH": str(tools)})
+    if idf_python_env:
+        env["IDF_PYTHON_ENV_PATH"] = idf_python_env
     riscv_arch = {
         "esp32c2": ("rv32imc_zicsr_zifencei", "ilp32"),
         "esp32c3": ("rv32imc_zicsr_zifencei", "ilp32"),
@@ -330,16 +366,41 @@ def build_ram_probe(target: str, repeat_count: int = 50,
         "esp32h4": ("rv32imafc_zicsr_zifencei", "ilp32f"),
         "esp32p4": ("rv32imafc_zicsr_zifencei", "ilp32f"),
     }
-    riscv_targets = set(riscv_arch)
-    toolchain = "riscv32-esp-elf" if target in riscv_targets else "xtensa-esp-elf"
-    compiler_name = "riscv32-esp-elf-gcc.exe" if toolchain.startswith("riscv") else f"xtensa-{target}-elf-gcc.exe"
-    roots = (ROOT / ".espressif" / "tools", tools)
-    bin_dir = next((candidate for root in roots
-                    for candidate in root.glob(f"{toolchain}/*/{toolchain}/bin")
-                    if (candidate / compiler_name).is_file()), None)
+    toolchain = "riscv32-esp-elf" if target in riscv_arch else "xtensa-esp-elf"
+    compiler_names = (f"{toolchain}-gcc", f"{toolchain}-gcc.exe")
+    bin_dir = None
+    cxx_include = None
+    arch, abi = riscv_arch.get(target, ("", ""))
+    toolchain_file = idf / "tools" / "cmake" / f"toolchain-{target}.cmake"
+    flags = toolchain_file.read_text(encoding="utf-8") if toolchain_file.is_file() else ""
+    march_match = re.search(r"-march=([^\s\"]+)", flags)
+    abi_match = re.search(r"-mabi=([^\s\"]+)", flags)
+    if march_match:
+        arch = march_match.group(1)
+        abi = abi_match.group(1) if abi_match else abi
+    for root in tool_roots:
+        for candidate in root.glob(f"{toolchain}/*/{toolchain}/bin"):
+            if not any((candidate / name).is_file() for name in compiler_names):
+                continue
+            if target in riscv_arch:
+                compiler_root = candidate.parent / "riscv32-esp-elf"
+                cxx_root = compiler_root / "include" / "c++"
+                version_root = next(iter(sorted(cxx_root.glob("*"), reverse=True)), None)
+                arch_root = version_root / "riscv32-esp-elf" if version_root else None
+                arch_dir = (next((p for p in arch_root.iterdir()
+                                  if p.is_dir() and arch.startswith(p.name)), None)
+                            if arch_root and arch_root.is_dir() else None)
+                candidate_include = arch_dir / abi / "no-rtti" if arch_dir else None
+                if not candidate_include or not candidate_include.is_dir():
+                    continue
+                cxx_include = candidate_include
+            bin_dir = candidate
+            break
+        if bin_dir:
+            break
     if bin_dir is None:
-        raise RuntimeError(f"ESP-IDF compiler {compiler_name} not found for {target}; checked {roots}")
-    env["PATH"] = str(python.parent) + ";" + str(bin_dir) + ";" + env.get("PATH", "")
+        raise RuntimeError(f"ESP-IDF compiler and matching headers for {target} not found; checked {tool_roots}")
+    env["PATH"] = os.pathsep.join((str(python.parent), str(bin_dir), env.get("PATH", "")))
     probe_project = ROOT / "probes" / "ram"
     defaults = str(probe_project / "sdkconfig.defaults")
     if profile in {"size", "profile"}:
@@ -352,25 +413,7 @@ def build_ram_probe(target: str, repeat_count: int = 50,
               f"-DCMAKE_C_FLAGS=-DSWID_RAM_PROBE_REPEAT_COUNT={repeat_count} -DSWID_RAM_PROBE_RESTART_AFTER_CAPTURE={1 if restart_after_capture else 0} -DSWID_RAM_PROBE_PROFILE_TIMINGS={1 if profile == 'profile' else 0}{' -fstack-usage' if profile == 'profile' else ''}",
               f"-DPYTHON={python}"]
     if target in riscv_arch:
-        toolchain_file = idf / "tools" / "cmake" / f"toolchain-{target}.cmake"
-        flags = toolchain_file.read_text(encoding="utf-8") if toolchain_file.is_file() else ""
-        march_match = re.search(r"-march=([^\s\"]+)", flags)
-        abi_match = re.search(r"-mabi=([^\s\"]+)", flags)
-        arch, abi = riscv_arch[target]
-        if march_match:
-            arch = march_match.group(1)
-            abi = abi_match.group(1) if abi_match else abi
-        compiler_root = bin_dir.parent / "riscv32-esp-elf"
-        cxx_root = compiler_root / "include" / "c++"
-        version_root = next(iter(sorted(cxx_root.glob("*"), reverse=True)), None)
-        arch_root = (version_root / "riscv32-esp-elf") if version_root else pathlib.Path()
-        arch_dir = next((p for p in arch_root.iterdir() if p.is_dir() and arch.startswith(p.name)), None) if arch_root.is_dir() else None
-        if arch_dir is None:
-            raise RuntimeError(f"RISC-V C++ architecture headers not found for -march={arch}")
-        cxx_include = arch_dir / abi / "no-rtti"
-        if not cxx_include.is_dir():
-            raise RuntimeError(f"RISC-V C++ target headers are unavailable: {cxx_include}")
-        args.append(f"-DCMAKE_CXX_FLAGS=-isystem{cxx_include}")
+        args.append(f'-DCMAKE_CXX_FLAGS=-isystem"{cxx_include}"')
     configure = subprocess.run(args, cwd=ROOT, env=env, text=True, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, timeout=180)
     if configure.returncode:
