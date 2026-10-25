@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* Copyright 2026 Vanderhell */
-#include "swid.h"
+#include "silitra.h"
 
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
@@ -17,7 +17,7 @@
 #define FP1_PAYLOAD_CAPACITY 1900u
 
 static void transport_write(const char *data, size_t length) {
-#ifdef SWID_FP1_UART_TRANSPORT
+#ifdef SILITRA_FP1_UART_TRANSPORT
     (void)uart_write_bytes(UART_NUM_0, data, length);
     (void)uart_wait_tx_done(UART_NUM_0, pdMS_TO_TICKS(1000));
 #else
@@ -27,7 +27,7 @@ static void transport_write(const char *data, size_t length) {
 }
 
 static int transport_read(uint8_t *byte) {
-#ifdef SWID_FP1_UART_TRANSPORT
+#ifdef SILITRA_FP1_UART_TRANSPORT
     return uart_read_bytes(UART_NUM_0, byte, 1, pdMS_TO_TICKS(250));
 #else
     return usb_serial_jtag_read_bytes(byte, 1, pdMS_TO_TICKS(250));
@@ -66,18 +66,18 @@ static void hex_encode(const uint8_t *data, size_t length, char *out) {
 }
 
 static void send_profile(const char *request_id) {
-    swid_manifest_t manifest;
+    silitra_manifest_t manifest;
     uint8_t digests[3][32];
     char hashes[3][65];
-    static const swid_fingerprint_kind_t kinds[] = {
-        SWID_FP_SILICON, SWID_FP_ASSEMBLY, SWID_FP_PROFILE
+    static const silitra_fingerprint_kind_t kinds[] = {
+        SILITRA_FP_SILICON, SILITRA_FP_ASSEMBLY, SILITRA_FP_PROFILE
     };
-    if (swid_get_manifest(&manifest) != SWID_OK) {
+    if (silitra_get_manifest(&manifest) != SILITRA_OK) {
         send_frame(request_id, "swid_profile", "{\"valid\":false}");
         return;
     }
     for (size_t i = 0; i < 3; ++i) {
-        if (swid_get_fingerprint(kinds[i], digests[i]) != SWID_OK) {
+        if (silitra_get_fingerprint(kinds[i], digests[i]) != SILITRA_OK) {
             send_frame(request_id, "swid_profile", "{\"valid\":false}");
             return;
         }
@@ -92,7 +92,7 @@ static void send_profile(const char *request_id) {
         "\"psram_capacity\":%" PRIu32 ",\"peripheral_count\":%u,"
         "\"silicon_fingerprint\":\"%s\",\"assembly_fingerprint\":\"%s\","
         "\"profile_fingerprint\":\"%s\"}",
-        SWID_SCHEMA_VERSION, manifest.chip.model, manifest.chip.revision, manifest.chip.cores,
+        SILITRA_SCHEMA_VERSION, manifest.chip.model, manifest.chip.revision, manifest.chip.cores,
         (int)esp_reset_reason(), manifest.identity.base_mac[0], manifest.identity.base_mac[1],
         manifest.identity.base_mac[2], manifest.identity.base_mac[3], manifest.identity.base_mac[4],
         manifest.identity.base_mac[5], manifest.identity.optional_uid_valid ? "true" : "false",
@@ -104,20 +104,20 @@ static void send_profile(const char *request_id) {
 }
 
 static void send_tlv(const char *request_id, const char *name) {
-    swid_fingerprint_kind_t kind;
-    if (strcmp(name, "silicon") == 0) kind = SWID_FP_SILICON;
-    else if (strcmp(name, "assembly") == 0) kind = SWID_FP_ASSEMBLY;
-    else if (strcmp(name, "profile") == 0) kind = SWID_FP_PROFILE;
+    silitra_fingerprint_kind_t kind;
+    if (strcmp(name, "silicon") == 0) kind = SILITRA_FP_SILICON;
+    else if (strcmp(name, "assembly") == 0) kind = SILITRA_FP_ASSEMBLY;
+    else if (strcmp(name, "profile") == 0) kind = SILITRA_FP_PROFILE;
     else {
         send_frame(request_id, "swid_tlv", "{\"valid\":false,\"error\":\"unknown_kind\"}");
         return;
     }
-    swid_manifest_t manifest;
+    silitra_manifest_t manifest;
     uint8_t encoded[1024];
     char hex[2049];
     size_t length = 0;
-    if (swid_get_manifest(&manifest) != SWID_OK ||
-        swid_serialize_fingerprint_input(&manifest, kind, encoded, sizeof(encoded), &length) != SWID_OK ||
+    if (silitra_get_manifest(&manifest) != SILITRA_OK ||
+        silitra_serialize_fingerprint_input(&manifest, kind, encoded, sizeof(encoded), &length) != SILITRA_OK ||
         length * 2 >= sizeof(hex)) {
         send_frame(request_id, "swid_tlv", "{\"valid\":false,\"error\":\"serialization_failed\"}");
         return;
@@ -127,7 +127,7 @@ static void send_tlv(const char *request_id, const char *name) {
     (void)snprintf(payload, sizeof(payload),
                    "{\"valid\":true,\"schema\":%u,\"kind\":\"%s\","
                    "\"length\":%u,\"tlv_hex\":\"%s\"}",
-                   SWID_SCHEMA_VERSION, name, (unsigned)length, hex);
+                   SILITRA_SCHEMA_VERSION, name, (unsigned)length, hex);
     send_frame(request_id, "swid_tlv", payload);
 }
 
@@ -192,8 +192,8 @@ static void command_loop(void) {
 }
 
 void app_main(void) {
-    const swid_err_t status = swid_init();
-#ifdef SWID_FP1_UART_TRANSPORT
+    const silitra_err_t status = silitra_init();
+#ifdef SILITRA_FP1_UART_TRANSPORT
     const uart_config_t config = {
         .baud_rate = 115200, .data_bits = UART_DATA_8_BITS, .parity = UART_PARITY_DISABLE,
         .stop_bits = UART_STOP_BITS_1, .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
@@ -210,7 +210,7 @@ void app_main(void) {
     }
 #endif
     printf("{\"type\":\"swid\",\"schema\":%u,\"init_status\":%d}\n",
-           SWID_SCHEMA_VERSION, (int)status);
+           SILITRA_SCHEMA_VERSION, (int)status);
     printf("{\"type\":\"ready\",\"commands\":\"ping|swid_profile|swid_tlv|software_reset\"}\n");
     fflush(stdout);
     command_loop();

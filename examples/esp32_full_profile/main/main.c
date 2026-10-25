@@ -1,22 +1,22 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* Copyright 2026 Vanderhell */
-#include "swid.h"
+#include "silitra.h"
 #include "esp_log.h"
 
-static const char *TAG = "swid_profile";
+static const char *TAG = "silitra_profile";
 
 void app_main(void) {
-    swid_manifest_t manifest;
+    silitra_manifest_t manifest;
     uint8_t silicon[32], assembly[32], profile[32];
-    if (swid_init() != SWID_OK || swid_get_manifest(&manifest) != SWID_OK ||
-        swid_get_fingerprint(SWID_FP_SILICON, silicon) != SWID_OK ||
-        swid_get_fingerprint(SWID_FP_ASSEMBLY, assembly) != SWID_OK ||
-        swid_get_fingerprint(SWID_FP_PROFILE, profile) != SWID_OK) {
-        ESP_LOGE(TAG, "SWID profile collection failed");
+    if (silitra_init() != SILITRA_OK || silitra_get_manifest(&manifest) != SILITRA_OK ||
+        silitra_get_fingerprint(SILITRA_FP_SILICON, silicon) != SILITRA_OK ||
+        silitra_get_fingerprint(SILITRA_FP_ASSEMBLY, assembly) != SILITRA_OK ||
+        silitra_get_fingerprint(SILITRA_FP_PROFILE, profile) != SILITRA_OK) {
+        ESP_LOGE(TAG, "SILITRA profile collection failed");
         return;
     }
     ESP_LOGI(TAG, "model=%u revision=%u cores=%u peripheral_entries=%u",
              manifest.chip.model, manifest.chip.revision, manifest.chip.cores,
              (unsigned)manifest.peripherals.count);
-    ESP_LOGI(TAG, "three schema-v2 digests computed; serialize with swid_serialize_fingerprint_input() as needed");
+    ESP_LOGI(TAG, "three schema-v2 digests computed; serialize with silitra_serialize_fingerprint_input() as needed");
 }

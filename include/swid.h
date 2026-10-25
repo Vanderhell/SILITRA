@@ -1,13 +1,13 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* Copyright 2026 Vanderhell */
 #pragma once
-
 #include "swid_types.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+/* Deprecated ABI compatibility entry points; remove in a future major release. */
 swid_err_t swid_init(void);
 swid_err_t swid_get_chip_info(swid_chip_info_t *out);
 swid_err_t swid_get_identity(swid_identity_t *out);

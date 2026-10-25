@@ -2,7 +2,7 @@ import hashlib
 import unittest
 
 
-class SwidCoreRegressionTests(unittest.TestCase):
+class SilitraCoreRegressionTests(unittest.TestCase):
     def test_sha256_known_answer(self):
         self.assertEqual(hashlib.sha256(b"abc").hexdigest(),
                          "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-set(EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../../components/swid")
-set(COMPONENTS main swid)
+set(EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../../components/silitra")
+set(COMPONENTS main silitra)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(swid_basic)
+project(silitra_basic)

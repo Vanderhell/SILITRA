@@ -1,4 +1,4 @@
-"""Read-only ROM/eFuse inventory and RAM-only SWID v2 capture helpers."""
+"""Read-only ROM/eFuse inventory and RAM-only SILITRA v2 capture helpers."""
 from __future__ import annotations
 
 import argparse
@@ -19,7 +19,7 @@ except ImportError:  # Host unit tests can exercise serialization without pyseri
     list_ports = None
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-OUT = ROOT / "results" / "swid_nonflash_research"
+OUT = ROOT / "results" / "silitra_nonflash_research"
 IDF_RAM_CANDIDATES = {
     "esp32", "esp32s2", "esp32s3", "esp32c2", "esp32c3", "esp32c5",
     "esp32c6", "esp32c61", "esp32h2", "esp32h21", "esp32h4", "esp32p4",
@@ -40,7 +40,7 @@ def le(value: int, width: int) -> bytes:
 
 
 def serialize_v2(manifest: dict, kind: str) -> bytes:
-    """Byte-for-byte equivalent to src/swid_core.c serialize_kind()."""
+    """Byte-for-byte equivalent to src/silitra_core.c serialize_kind()."""
     kinds = {"silicon": 1, "assembly": 2, "profile": 3}
     if kind not in kinds:
         raise ValueError("unknown fingerprint kind")
@@ -115,7 +115,7 @@ def _find_idf_python() -> pathlib.Path:
     if env_path:
         env_dir = pathlib.Path(env_path)
         candidates.extend((env_dir / "Scripts" / "python.exe", env_dir / "bin" / "python"))
-    override = os.environ.get("SWID_PYTHON")
+    override = os.environ.get("SILITRA_PYTHON") or os.environ.get("SWID_PYTHON")
     if override:
         candidates.append(pathlib.Path(override))
     for tools_root in _idf_tools_roots():
@@ -318,9 +318,10 @@ def build_ram_probe(target: str, repeat_count: int = 50,
         raise ValueError("RAM probe repeat_count must be in 1..100")
     if profile not in {"default", "size", "profile"}:
         raise ValueError("RAM probe profile must be default, size, or profile")
-    idf_value = os.environ.get("SWID_IDF_PATH") or os.environ.get("IDF_PATH")
+    idf_value = (os.environ.get("SILITRA_IDF_PATH") or os.environ.get("SWID_IDF_PATH")
+                 or os.environ.get("IDF_PATH"))
     if not idf_value:
-        raise RuntimeError("ESP-IDF was not exported; set IDF_PATH or SWID_IDF_PATH before building the RAM Probe")
+        raise RuntimeError("ESP-IDF was not exported; set IDF_PATH, SILITRA_IDF_PATH, or legacy SWID_IDF_PATH before building the RAM Probe")
     idf = pathlib.Path(idf_value)
     tools = _idf_tools_root()
     if not (idf / "tools" / "cmake" / "project.cmake").is_file():
@@ -410,7 +411,7 @@ def build_ram_probe(target: str, repeat_count: int = 50,
     args = [str(cmake), "-G", "Ninja", "-S", str(probe_project), "-B", str(build),
             f"-DIDF_TARGET={target}", f"-DSDKCONFIG={sdkconfig}",
             f"-DSDKCONFIG_DEFAULTS={defaults}",
-              f"-DCMAKE_C_FLAGS=-DSWID_RAM_PROBE_REPEAT_COUNT={repeat_count} -DSWID_RAM_PROBE_RESTART_AFTER_CAPTURE={1 if restart_after_capture else 0} -DSWID_RAM_PROBE_PROFILE_TIMINGS={1 if profile == 'profile' else 0}{' -fstack-usage' if profile == 'profile' else ''}",
+              f"-DCMAKE_C_FLAGS=-DSILITRA_RAM_PROBE_REPEAT_COUNT={repeat_count} -DSILITRA_RAM_PROBE_RESTART_AFTER_CAPTURE={1 if restart_after_capture else 0} -DSILITRA_RAM_PROBE_PROFILE_TIMINGS={1 if profile == 'profile' else 0}{' -fstack-usage' if profile == 'profile' else ''}",
               f"-DPYTHON={python}"]
     if target in riscv_arch:
         args.append(f'-DCMAKE_CXX_FLAGS=-isystem"{cxx_include}"')
@@ -422,14 +423,14 @@ def build_ram_probe(target: str, repeat_count: int = 50,
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
     log = build / "build.log"
     log.write_text(compile_result.stdout, encoding="utf-8")
-    image = build / "swid_ram_probe.bin"
+    image = build / "silitra_ram_probe.bin"
     if compile_result.returncode or not image.exists():
         raise RuntimeError(f"RAM probe {target} build failed; see {log}")
     info = run_tool("-m", "esptool", "--chip", target, "image_info", str(image), timeout=45)
     if "Entry point:" not in info or "segments" not in info:
         raise RuntimeError("RAM probe image failed esptool segment validation")
     return {"target": target, "image": image, "image_bytes": image.stat().st_size,
-            "elf": build / "swid_ram_probe.elf", "map": build / "swid_ram_probe.map",
+            "elf": build / "silitra_ram_probe.elf", "map": build / "silitra_ram_probe.map",
             "image_info": info, "build_log": log,
             "sdkconfig_ram": "CONFIG_APP_BUILD_TYPE_RAM=y" in sdkconfig.read_text(encoding="utf-8"),
             "sdkconfig": sdkconfig}
@@ -565,7 +566,7 @@ def validate_ram_fingerprints(records: list[dict]) -> dict:
                           "tlv_sha256": digest, "tlv_bytes": len(data),
                           "tlv_hex": received["tlv_hex"], "sha256": received["sha256"]}
         if not verified[kind]["tlv_matches_device"] or not verified[kind]["sha256_matches_device"]:
-            raise RuntimeError(f"host/C SWID v2 serialization mismatch for {kind}")
+            raise RuntimeError(f"host/C SILITRA v2 serialization mismatch for {kind}")
     summaries = [item for item in records if item.get("type") == "repeat_summary"]
     repeat_errors = [item for item in records if item.get("type") == "repeat_error"]
     expected_digests = {kind: item["sha256"] for kind, item in verified.items()}
@@ -588,12 +589,12 @@ def parse_tlv(data: bytes) -> list[tuple[int, bytes]]:
     offset = 0
     while offset < len(data):
         if len(data) - offset < 3:
-            raise ValueError("truncated SWID TLV header")
+            raise ValueError("truncated SILITRA TLV header")
         field = data[offset]
         length = int.from_bytes(data[offset + 1:offset + 3], "little")
         offset += 3
         if length > len(data) - offset:
-            raise ValueError("truncated SWID TLV value")
+            raise ValueError("truncated SILITRA TLV value")
         fields.append((field, data[offset:offset + length]))
         offset += length
     return fields
@@ -601,7 +602,7 @@ def parse_tlv(data: bytes) -> list[tuple[int, bytes]]:
 
 def capture_existing_flash_reference(mac: str, target: str, port: str,
                                      ram_validation: dict | None = None) -> dict:
-    """Read the already-installed SWID v2 app over FP1; never programs flash."""
+    """Read the already-installed SILITRA v2 app over FP1; never programs flash."""
     if identify(port)["mac"] != mac.upper():
         raise RuntimeError("flash-reference port failed ROM MAC verification")
     run_tool("-m", "esptool", "--chip", target, "--port", port,
@@ -610,7 +611,7 @@ def capture_existing_flash_reference(mac: str, target: str, port: str,
     with FP1Session(mac, port) as session:
         profile = session.request("swid_profile")
         if not profile.get("valid") or profile.get("schema") != 2:
-            raise RuntimeError("installed flash firmware did not provide a valid SWID v2 profile")
+            raise RuntimeError("installed flash firmware did not provide a valid SILITRA v2 profile")
         compared = {}
         for kind in ("silicon", "assembly", "profile"):
             device_tlv = bytes.fromhex(session.request("swid_tlv", kind)["tlv_hex"])
@@ -773,7 +774,7 @@ def run_ram_campaign(port: str, expected_mac: str | None,
         "ROM_ONLY": {"supported_targets": {"ESP32-S3": "HARDWARE_VERIFIED", "ESP32-C3": "NOT_CONNECTED"},
                      "fields_observed": 10,
                      "field_sources": ["ROM chip identity/features", "flash JEDEC", "detected flash capacity", "ROM PSRAM feature"],
-                     "fingerprint_availability": "UNAVAILABLE (incomplete normalized SWID manifest)", "scheme_v2_match": False,
+                     "fingerprint_availability": "UNAVAILABLE (incomplete normalized SILITRA manifest)", "scheme_v2_match": False,
                      "ram_bytes": None, "measurement_seconds": inventory["elapsed_seconds"],
                      "safety_assumptions": ["ROM download interface is enabled", "only chip_id/flash_id/read operations used"],
                      "flash_unchanged": result["flash_unchanged"], "testing": "PHYSICAL_READ_ONLY"},
@@ -820,7 +821,7 @@ def run_ram_reset_campaign(port: str, mac: str, target: str, image: pathlib.Path
                            baseline_validation: dict, repeat_count: int = 1000,
                            reset_count: int = 20, progress=None,
                            flash_reference: dict | None = None) -> dict:
-    """Collect repeated SWID profiles in RAM after each confirmed software reset."""
+    """Collect repeated SILITRA profiles in RAM after each confirmed software reset."""
     if repeat_count < 1 or repeat_count > 1000 or reset_count < 0:
         raise ValueError("repeat_count must be 1..1000 and reset_count must be nonnegative")
     if reset_count < 1 or repeat_count % reset_count:
@@ -922,7 +923,7 @@ def run_ram_reset_campaign(port: str, mac: str, target: str, image: pathlib.Path
                 "field_id": 44 if legacy_radio_delta else None,
                 "installed_app_value": "01" if legacy_radio_delta else None,
                 "ram_value": "00" if legacy_radio_delta else None},
-            "note": "Each RAM Probe performs repeat_count_per_capture complete SWID collections, emits a software-reset request and calls esp_restart(). The next iteration confirms ROM loader availability and reloads the RAM image. FP1 recovery is optional and only runs when an FP1 reference is supplied. No flash writes are performed."}
+            "note": "Each RAM Probe performs repeat_count_per_capture complete SILITRA collections, emits a software-reset request and calls esp_restart(). The next iteration confirms ROM loader availability and reloads the RAM image. FP1 recovery is optional and only runs when an FP1 reference is supplied. No flash writes are performed."}
 
 
 def run_existing_flash_backend(port: str, expected_mac: str | None) -> dict:
@@ -950,7 +951,7 @@ def main() -> int:
     parser.add_argument("--verify-flash", action="store_true",
                         help="read complete flash before/after RAM capture and compare SHA-256 (read-only, slow)")
     parser.add_argument("--check-fp1", action="store_true",
-                        help="optionally compare against an already-installed SWID FP1 app; RAM Probe does not require it")
+                        help="optionally compare against an already-installed SILITRA FP1 app; RAM Probe does not require it")
     args = parser.parse_args()
     if args.list:
         print(json.dumps(candidates(), indent=2))

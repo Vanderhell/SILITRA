@@ -1,4 +1,4 @@
-"""FP1 framing and session helpers used by SWID acquisition."""
+"""FP1 framing and session helpers used by SILITRA acquisition."""
 
 import json
 import time
@@ -76,7 +76,7 @@ class FP1Session:
         if self.reset_pending:
             time.sleep(3.0)
             self.reset_pending = False
-        request_id = "swid-" + uuid.uuid4().hex[:10]
+        request_id = "silitra-" + uuid.uuid4().hex[:10]
         encoded = make_frame(request_id, command, payload)
         for _attempt in range(2):
             self.ser.write(encoded)
@@ -99,7 +99,7 @@ class FP1Session:
         raise TimeoutError(f"FP1 session timeout on {self.mac} command={command}")
 
     def stream(self, command: str, payload: str = "", timeout: float = 30) -> list[tuple[str, dict]]:
-        request_id = "swid-" + uuid.uuid4().hex[:10]
+        request_id = "silitra-" + uuid.uuid4().hex[:10]
         self.ser.write(make_frame(request_id, command, payload))
         self.ser.flush()
         frames = []

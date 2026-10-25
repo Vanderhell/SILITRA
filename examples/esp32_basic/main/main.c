@@ -1,16 +1,16 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* Copyright 2026 Vanderhell */
-#include "swid.h"
+#include "silitra.h"
 #include "esp_log.h"
 
-static const char *TAG = "swid_basic";
+static const char *TAG = "silitra_basic";
 
 void app_main(void) {
     uint8_t digest[32];
-    swid_identity_t identity;
-    if (swid_init() != SWID_OK || swid_get_identity(&identity) != SWID_OK ||
-        swid_get_fingerprint(SWID_FP_SILICON, digest) != SWID_OK) {
-        ESP_LOGE(TAG, "SWID initialization/read failed");
+    silitra_identity_t identity;
+    if (silitra_init() != SILITRA_OK || silitra_get_identity(&identity) != SILITRA_OK ||
+        silitra_get_fingerprint(SILITRA_FP_SILICON, digest) != SILITRA_OK) {
+        ESP_LOGE(TAG, "SILITRA initialization/read failed");
         return;
     }
     ESP_LOGI(TAG, "Factory MAC %02X:%02X:%02X:%02X:%02X:%02X",

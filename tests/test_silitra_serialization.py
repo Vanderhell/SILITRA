@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from host.swid_nonflash import (fingerprint, parse_safe_efuse_summary, parse_tlv,
+from host.silitra import (fingerprint, parse_safe_efuse_summary, parse_tlv,
                                 RAM_PROBE_BUILD_VERIFIED_TARGETS, identify_expected_device,
                                 discover_rom_devices, run_ram_campaign, select_backend, serialize_v2,
                                 validate_ram_fingerprints, _find_idf_python, _idf_tools_root)
@@ -34,6 +34,12 @@ def sample_manifest():
 class NonFlashSerializationTests(unittest.TestCase):
     def test_schema_v2_known_answers(self):
         manifest = sample_manifest()
+        baseline_tlv = {
+            "silicon": "0104005357494402040002000000030100010A020020000B020003000C0100020D0100020E0100010F04003412000014060002000000000115100000112233445566778899AABBCCDDEEFF",
+            "assembly": "0104005357494402040002000000030100020A020020000B020003000C0100020D0100020E0100010F04003412000014060002000000000115100000112233445566778899AABBCCDDEEFF1E0400184020001F04000000000120040000008000210100012201000223010001240800EFCDAB8967452301",
+        }
+        for kind, encoded_hex in baseline_tlv.items():
+            self.assertEqual(serialize_v2(manifest, kind).hex().upper(), encoded_hex)
         expected = {
             "silicon": "B16EA38CA647F2084046EF9D916453C1DE52F7BB98FCA2835EB2616CBCFE074F",
             "assembly": "A858D1DA921A71A5C9080661EFF91A903B37F431ED8E69CF10A8164DD357D3A4",
@@ -123,15 +129,15 @@ class NonFlashSerializationTests(unittest.TestCase):
                                     "stack_high_water_bytes": 300}],
                        "load_seconds": 0.1, "capture_seconds": 0.2,
                        "software_reset_requested": True}
-            with mock.patch("host.swid_nonflash.OUT", pathlib.Path(temp)), \
-                 mock.patch("host.swid_nonflash.identify_expected_device", return_value=identity), \
-                 mock.patch("host.swid_nonflash.read_only_rom_inventory", return_value=inventory), \
-                 mock.patch("host.swid_nonflash.build_ram_probe", return_value=artifact), \
-                 mock.patch("host.swid_nonflash.capture_ram_probe", return_value=capture), \
-                 mock.patch("host.swid_nonflash.validate_ram_fingerprints", return_value=validation), \
-                 mock.patch("host.swid_nonflash.read_flash_hash") as flash_read, \
-                 mock.patch("host.swid_nonflash.capture_existing_flash_reference") as fp1_read, \
-                 mock.patch("host.swid_nonflash.write_backend_summary"):
+            with mock.patch("host.silitra.OUT", pathlib.Path(temp)), \
+                 mock.patch("host.silitra.identify_expected_device", return_value=identity), \
+                 mock.patch("host.silitra.read_only_rom_inventory", return_value=inventory), \
+                 mock.patch("host.silitra.build_ram_probe", return_value=artifact), \
+                 mock.patch("host.silitra.capture_ram_probe", return_value=capture), \
+                 mock.patch("host.silitra.validate_ram_fingerprints", return_value=validation), \
+                 mock.patch("host.silitra.read_flash_hash") as flash_read, \
+                 mock.patch("host.silitra.capture_existing_flash_reference") as fp1_read, \
+                 mock.patch("host.silitra.write_backend_summary"):
                 result = run_ram_campaign("COM9", identity["mac"], inventory)
             flash_read.assert_not_called()
             fp1_read.assert_not_called()
@@ -143,8 +149,8 @@ class NonFlashSerializationTests(unittest.TestCase):
     def test_reenumerated_port_is_resolved_by_rom_mac(self):
         rows = [{"port": "COM7"}, {"port": "COM8"}]
         expected = {"port": "COM8", "mac": "02:00:00:00:00:0A", "model": "ESP32-S3"}
-        with mock.patch("host.swid_nonflash.candidates", return_value=rows), \
-             mock.patch("host.swid_nonflash.identify", side_effect=[
+        with mock.patch("host.silitra.candidates", return_value=rows), \
+             mock.patch("host.silitra.identify", side_effect=[
                  RuntimeError("stale COM7"), expected]):
             result = identify_expected_device("02:00:00:00:00:0A", "COM6", "esp32s3", attempts=1)
         self.assertEqual(result["port"], "COM8")
@@ -152,8 +158,8 @@ class NonFlashSerializationTests(unittest.TestCase):
     def test_rom_discovery_skips_non_esp_serial_ports_and_deduplicates(self):
         rows = [{"port": "COM1"}, {"port": "COM2"}, {"port": "COM3"}]
         device = {"port": "COM2", "mac": "02:00:00:00:00:0A", "model": "ESP32-S3"}
-        with mock.patch("host.swid_nonflash.candidates", return_value=rows), \
-             mock.patch("host.swid_nonflash.identify", side_effect=[
+        with mock.patch("host.silitra.candidates", return_value=rows), \
+             mock.patch("host.silitra.identify", side_effect=[
                  RuntimeError("not an ESP32"), device, device]):
             found = discover_rom_devices()
         self.assertEqual(found, [device])
@@ -167,7 +173,7 @@ class NonFlashSerializationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             override = pathlib.Path(temp) / "python"
             override.write_bytes(b"test executable placeholder")
-            with mock.patch.dict("os.environ", {"SWID_PYTHON": str(override)}):
+            with mock.patch.dict("os.environ", {"SILITRA_PYTHON": str(override)}):
                 self.assertEqual(_find_idf_python(), override)
 
 
